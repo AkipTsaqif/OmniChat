@@ -140,6 +140,18 @@ function ChatHeader({
   );
 }
 
+/** Survives the remount caused by rewriting the URL to /c/<id>. */
+const STREAM_ERROR_KEY = "omnichat:last-stream-error";
+
+/** sessionStorage is only written by this component, so same-tab writes
+ *  notify through a custom event rather than the cross-tab `storage` event. */
+const STREAM_ERROR_EVENT = "omnichat:stream-error-changed";
+
+function subscribeToStreamError(onChange: () => void) {
+  window.addEventListener(STREAM_ERROR_EVENT, onChange);
+  return () => window.removeEventListener(STREAM_ERROR_EVENT, onChange);
+}
+
 export function ChatView({
   conversations,
   provider,
@@ -203,9 +215,37 @@ export function ChatView({
   const [streamText, setStreamText] = React.useState("");
   const [streamingToolCalls, setStreamingToolCalls] = React.useState<ToolCallInfo[]>([]);
   const [streaming, setStreaming] = React.useState(false);
-  const [streamError, setStreamError] = React.useState<string | null>(null);
+  // Starting a chat rewrites the URL to /c/<id>, which remounts this tree and
+  // destroys local state. A gateway error raised during that window would be
+  // lost, so it is parked in sessionStorage and rehydrated on mount.
+  const [streamErrorState, setStreamErrorState] = React.useState<string | null>(
+    null,
+  );
+
+  const setStreamError = React.useCallback((value: string | null) => {
+    setStreamErrorState(value);
+    if (typeof window === "undefined") return;
+    if (value) {
+      window.sessionStorage.setItem(STREAM_ERROR_KEY, value);
+    } else {
+      window.sessionStorage.removeItem(STREAM_ERROR_KEY);
+    }
+    window.dispatchEvent(new Event(STREAM_ERROR_EVENT));
+  }, []);
+
+  // Read the parked error without an effect, so a remount picks it up on the
+  // first client render rather than after a cascading setState.
+  const rehydratedError = React.useSyncExternalStore(
+    subscribeToStreamError,
+    () => window.sessionStorage.getItem(STREAM_ERROR_KEY),
+    () => null,
+  );
+
+  const streamError = streamErrorState ?? rehydratedError;
 
   const abortRef = React.useRef<AbortController | null>(null);
+  /** True only when the user pressed stop, so unmount aborts stay reportable. */
+  const stopRequestedRef = React.useRef(false);
   const bottomRef = React.useRef<HTMLDivElement>(null);
 
   const active = conversations.find((c) => c.id === activeId) ?? null;
@@ -282,6 +322,8 @@ export function ChatView({
   ) {
     const controller = new AbortController();
     abortRef.current = controller;
+    stopRequestedRef.current = false;
+    let failure: string | null = null;
 
     try {
       const response = await fetch("/api/chat", {
@@ -311,19 +353,11 @@ export function ChatView({
       const decoder = new TextDecoder();
       let buffer = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-
-        for (const frame of frames) {
+      const handleFrame = (frame: string) => {
           const dataLine = frame
             .split("\n")
             .find((line) => line.startsWith("data:"));
-          if (!dataLine) continue;
+          if (!dataLine) return;
 
           const payload = JSON.parse(dataLine.slice(5).trim());
           if (frame.includes("event: delta")) {
@@ -349,13 +383,34 @@ export function ChatView({
           } else if (frame.includes("event: error")) {
             throw new Error(payload.message);
           }
-        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+
+        for (const frame of frames) handleFrame(frame);
       }
+
+      // The final frame can be left in the buffer when the stream ends without
+      // a trailing blank line — which is exactly how error frames arrive.
+      if (buffer.trim()) handleFrame(buffer);
     } catch (error) {
-      if ((error as Error).name !== "AbortError") {
-        setStreamError(
-          error instanceof Error ? error.message : "The request failed.",
-        );
+      // Only treat it as a user-initiated stop when we actually asked to
+      // abort. An AbortError from an unmount or a dropped connection still
+      // needs its reason surfaced, otherwise real gateway failures vanish.
+      const userStopped = stopRequestedRef.current;
+      if (!userStopped) {
+        failure =
+          error instanceof Error && error.name === "AbortError"
+            ? "The connection to the gateway was interrupted."
+            : error instanceof Error
+              ? error.message
+              : "The request failed.";
       }
     } finally {
       abortRef.current = null;
@@ -366,6 +421,7 @@ export function ChatView({
         setLocalUser(null);
         setStreamText("");
         setStreamingToolCalls([]);
+        if (failure) setStreamError(failure);
       }
     }
   }
@@ -406,6 +462,7 @@ export function ChatView({
   }
 
   function handleStop() {
+    stopRequestedRef.current = true;
     abortRef.current?.abort();
   }
 

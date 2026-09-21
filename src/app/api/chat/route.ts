@@ -40,6 +40,14 @@ function sse(event: string, data: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+/** An error the gateway reported inside the SSE body rather than via status. */
+class GatewayStreamError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GatewayStreamError";
+  }
+}
+
 async function readSseStream(
   upstream: Response,
   onDelta: (delta: string) => void,
@@ -71,6 +79,18 @@ async function readSseStream(
 
         try {
           const json = JSON.parse(payload);
+
+          // Gateways may answer 200, stream keep-alives, then report the real
+          // failure as an error frame inside the body. Surface it instead of
+          // letting the stream finish empty.
+          if (json.error) {
+            const reason =
+              typeof json.error === "string"
+                ? json.error
+                : json.error.message || "The gateway reported an error.";
+            throw new GatewayStreamError(String(reason));
+          }
+
           const choice = json.choices?.[0];
           const delta = choice?.delta;
 
@@ -83,8 +103,9 @@ async function readSseStream(
               onToolCallDelta(tc);
             }
           }
-        } catch {
-          // Ignore keep-alives or partial fragments
+        } catch (error) {
+          // Re-throw real gateway errors; ignore keep-alives and partial frames.
+          if (error instanceof GatewayStreamError) throw error;
         }
       }
     }
@@ -392,7 +413,9 @@ export async function POST(request: Request) {
         }
 
         if (!full.trim()) {
-          throw new Error("No response generated from the model.");
+          throw new Error(
+            `${modelId} returned an empty response. The model may be unavailable on your gateway — try a different one.`,
+          );
         }
 
         // Persist once the complete reply and any tool calls are known.
@@ -409,10 +432,14 @@ export async function POST(request: Request) {
         );
       } catch (error) {
         // An abort is the user pressing stop — keep the partial reply rather
-        // than discarding work the model already produced.
+        // than discarding work the model already produced. A gateway failure
+        // reported mid-stream is NOT an abort, so check the error itself and
+        // never let a real reason be reported as "interrupted".
+        const isGatewayError = error instanceof GatewayStreamError;
         const aborted =
-          request.signal.aborted ||
-          (error instanceof Error && error.name === "AbortError");
+          !isGatewayError &&
+          ((error instanceof Error && error.name === "AbortError") ||
+            request.signal.aborted);
 
         try {
           const saved = await persist();
