@@ -10,7 +10,15 @@ import {
   StarIcon,
 } from "lucide-react";
 
-import type { Conversation, Feedback, Message, Model, ThinkingLevel, ToolCallInfo } from "@/lib/types";
+import type {
+  Conversation,
+  Feedback,
+  Message,
+  Model,
+  ProviderStatus,
+  ThinkingLevel,
+  ToolCallInfo,
+} from "@/lib/types";
 import {
   createUserMessage,
   prepareRegenerate,
@@ -136,12 +144,16 @@ export function ChatView({
   conversations,
   provider,
   models,
+  providerStatus = "none",
+  providerMessage = null,
   user,
   initialActiveId = null,
 }: {
   conversations: Conversation[];
   provider: ProviderSummary;
   models: Model[];
+  providerStatus?: ProviderStatus;
+  providerMessage?: string | null;
   user: SessionUser;
   initialActiveId?: string | null;
 }) {
@@ -178,11 +190,11 @@ export function ChatView({
   // Null until the user picks explicitly, so a late-arriving model list (after
   // the key is saved) still supplies a sensible default without an effect.
   const [draftModelId, setDraftModelId] = React.useState<string | null>(null);
-  // Prompt on first load when there is no usable connection. Covers both
-  // "never configured" and "configured but the gateway returned no models"
-  // (unreachable host, revoked key), which would otherwise strand the user.
+  // Only force the dialog open when nothing is configured, or when the stored
+  // key genuinely cannot be used again. A gateway that is merely down or
+  // briefly unreachable should not nag for a key that is still valid.
   const [keyDialogOpen, setKeyDialogOpen] = React.useState(
-    !provider || models.length === 0,
+    !provider || providerStatus === "key_undecryptable",
   );
   const [, startTransition] = React.useTransition();
 
@@ -450,6 +462,7 @@ export function ChatView({
           onNewChat={handleNewChat}
           onOpenSettings={handleOpenSettings}
           provider={provider}
+          providerStatus={providerStatus}
         />
 
         <SidebarInset className="h-svh overflow-hidden">
@@ -537,6 +550,8 @@ export function ChatView({
                   onPick={handleSend}
                   hasProvider={!!provider && hasModels}
                   isConfigured={!!provider}
+                  providerStatus={providerStatus}
+                  providerMessage={providerMessage}
                   onConfigure={() => handleOpenSettings("provider")}
                 />
               </div>

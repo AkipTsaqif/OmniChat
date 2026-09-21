@@ -1,45 +1,131 @@
 "use client";
 
-import { ArrowUpRightIcon, KeyRoundIcon, MessagesSquareIcon } from "lucide-react";
+import * as React from "react";
+import { useRouter } from "next/navigation";
+import {
+  ArrowUpRightIcon,
+  KeyRoundIcon,
+  LoaderIcon,
+  MessagesSquareIcon,
+  PlugZapIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 
+import { recheckProvider } from "@/app/settings-actions";
 import { SUGGESTIONS } from "@/lib/data";
+import type { ProviderStatus } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+
+/** Copy for each way a saved gateway can fail. */
+const STATUS_COPY: Record<
+  string,
+  { title: string; body: string; action: "retry" | "key" }
+> = {
+  unreachable: {
+    title: "Gateway unreachable",
+    body: "Your provider is saved, but OmniChat could not reach it. Your API key is still stored — start the gateway and try again.",
+    action: "retry",
+  },
+  unauthorized: {
+    title: "API key rejected",
+    body: "The gateway is running but refused your key. It may have been revoked or rotated.",
+    action: "key",
+  },
+  key_undecryptable: {
+    title: "Saved key cannot be read",
+    body: "Your stored API key can no longer be decrypted, which happens when OMNICHAT_ENCRYPTION_KEY changes. Re-enter the key to reconnect.",
+    action: "key",
+  },
+  empty: {
+    title: "No models available",
+    body: "The gateway is connected but is not serving any models.",
+    action: "retry",
+  },
+};
 
 export function EmptyState({
   onPick,
   hasProvider,
   isConfigured,
+  providerStatus = "none",
+  providerMessage = null,
   onConfigure,
 }: {
   onPick: (prompt: string) => void;
   hasProvider: boolean;
   isConfigured: boolean;
+  providerStatus?: ProviderStatus;
+  providerMessage?: string | null;
   onConfigure: () => void;
 }) {
+  const [rechecking, setRechecking] = React.useState(false);
+  const [recheckNote, setRecheckNote] = React.useState<string | null>(null);
+  const router = useRouter();
+
+  async function handleRecheck() {
+    setRechecking(true);
+    setRecheckNote(null);
+    try {
+      const result = await recheckProvider();
+      if (result.status === "ok") {
+        router.refresh();
+        return;
+      }
+      setRecheckNote(result.message ?? "Still unavailable.");
+    } catch {
+      setRecheckNote("Could not check the gateway.");
+    } finally {
+      setRechecking(false);
+    }
+  }
+
   if (!hasProvider) {
-    // Configured but no models means the gateway answered with nothing, or
-    // could not be reached — say so instead of repeating the setup pitch.
-    const stale = isConfigured;
+    const copy = isConfigured ? STATUS_COPY[providerStatus] : undefined;
 
     return (
       <div className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center px-4 py-10 text-center">
         <div className="flex size-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
-          <KeyRoundIcon className="size-5" />
+          {copy?.action === "retry" ? (
+            <PlugZapIcon className="size-5" />
+          ) : (
+            <KeyRoundIcon className="size-5" />
+          )}
         </div>
 
         <h1 className="mt-4 text-2xl font-semibold tracking-tight">
-          {stale ? "No models available" : "Connect a provider"}
+          {copy?.title ?? "Connect a provider"}
         </h1>
         <p className="mt-1.5 text-sm text-muted-foreground">
-          {stale
-            ? "Your gateway is saved but returned no models. Check that it is running and that the key is still valid."
-            : "OmniChat does not ship with any models of its own. Point it at your OmniRoute gateway and it will load whatever models you have available."}
+          {providerMessage ??
+            copy?.body ??
+            "OmniChat does not ship with any models of its own. Point it at your OmniRoute gateway and it will load whatever models you have available."}
         </p>
 
-        <Button onClick={onConfigure} size="lg" className="mt-6">
-          <KeyRoundIcon />
-          {stale ? "Check connection" : "Add your API key"}
-        </Button>
+        <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+          {copy?.action === "retry" ? (
+            <Button onClick={handleRecheck} size="lg" disabled={rechecking}>
+              {rechecking ? (
+                <LoaderIcon className="animate-spin" />
+              ) : (
+                <RefreshCwIcon />
+              )}
+              {rechecking ? "Checking…" : "Retry connection"}
+            </Button>
+          ) : null}
+
+          <Button
+            onClick={onConfigure}
+            size="lg"
+            variant={copy?.action === "retry" ? "outline" : "default"}
+          >
+            <KeyRoundIcon />
+            {isConfigured ? "Provider settings" : "Add your API key"}
+          </Button>
+        </div>
+
+        {recheckNote ? (
+          <p className="mt-3 text-xs text-muted-foreground">{recheckNote}</p>
+        ) : null}
       </div>
     );
   }

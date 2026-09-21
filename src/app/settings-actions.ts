@@ -5,8 +5,10 @@ import { and, eq } from "drizzle-orm";
 
 import { auth } from "@/auth";
 import { db } from "@/db";
+import { checkProviderHealth } from "@/db/models";
 import { conversations, providerSettings, users } from "@/db/schema";
 import { encryptSecret } from "@/lib/crypto";
+import type { ProviderStatus } from "@/lib/types";
 
 export type SettingsState = { error?: string; ok?: boolean };
 
@@ -158,4 +160,25 @@ export async function setConversationSystemPrompt(
 
   revalidatePath("/", "layout");
   return { ok: true };
+}
+
+/**
+ * Re-probes the saved gateway and reports whether it is still usable.
+ * Lets the UI recover from a transient outage without making the user
+ * re-enter their key, and explains *why* when models are unavailable.
+ */
+export async function recheckProvider(): Promise<{
+  status: ProviderStatus;
+  message: string | null;
+  modelCount: number;
+}> {
+  const userId = await requireUserId();
+  const health = await checkProviderHealth(userId);
+
+  revalidatePath("/", "layout");
+  return {
+    status: health.status,
+    message: health.message,
+    modelCount: health.models.length,
+  };
 }

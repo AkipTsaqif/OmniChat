@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 
 import { auth } from "@/auth";
 import { ChatView } from "@/components/chat/chat-view";
-import { getAvailableModels } from "@/db/models";
+import { checkProviderHealth } from "@/db/models";
 import {
   getConversations,
   getProviderSummary,
@@ -26,10 +26,10 @@ export default async function Page() {
   const session = await auth();
   if (!session?.user?.id) redirect("/login");
 
-  const [conversations, provider, models, systemPrompt] = await Promise.all([
+  const [conversations, provider, health, systemPrompt] = await Promise.all([
     getConversations(session.user.id),
     getProviderSummary(session.user.id),
-    getAvailableModels(session.user.id),
+    checkProviderHealth(session.user.id),
     getUserSystemPrompt(session.user.id),
   ]);
 
@@ -39,7 +39,9 @@ export default async function Page() {
     <ChatView
       conversations={conversations}
       provider={provider}
-      models={models}
+      models={health.models}
+      providerStatus={health.status}
+      providerMessage={health.message}
       user={{
         name: session.user.name ?? email.split("@")[0],
         email,

@@ -12,6 +12,15 @@ export type ProviderId =
 
 export type ThinkingLevel = "off" | "low" | "medium" | "high";
 
+/** Result of probing the user's configured gateway. */
+export type ProviderStatus =
+  | "none"
+  | "ok"
+  | "empty"
+  | "unauthorized"
+  | "unreachable"
+  | "key_undecryptable";
+
 export type Provider = {
   id: ProviderId;
   name: string;

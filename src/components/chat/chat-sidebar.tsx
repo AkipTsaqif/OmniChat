@@ -17,7 +17,15 @@ import {
   WandSparklesIcon,
 } from "lucide-react";
 
-import type { Conversation } from "@/lib/types";
+import type { Conversation, ProviderStatus } from "@/lib/types";
+
+/** Short sidebar label for a gateway that is configured but not usable. */
+const PROVIDER_STATUS_LABEL: Partial<Record<ProviderStatus, string>> = {
+  unreachable: "Gateway unreachable",
+  unauthorized: "API key rejected",
+  key_undecryptable: "Key needs re-entry",
+  empty: "No models served",
+};
 import { HISTORY_BUCKETS } from "@/lib/data";
 import {
   archiveConversation,
@@ -146,6 +154,7 @@ export function ChatSidebar({
   onNewChat,
   onOpenSettings,
   provider,
+  providerStatus = "none",
 }: {
   conversations: Conversation[];
   activeId: string | null;
@@ -153,6 +162,7 @@ export function ChatSidebar({
   onNewChat: () => void;
   onOpenSettings: (tab?: "provider" | "prompts") => void;
   provider: { provider: string; baseUrl: string; last4: string } | null;
+  providerStatus?: ProviderStatus;
 }) {
   const user = useSessionUser();
   const [query, setQuery] = React.useState("");
@@ -259,7 +269,13 @@ export function ChatSidebar({
               className="gap-2 border bg-background"
             >
               <SparklesIcon
-                className={provider ? "text-emerald-500" : "text-amber-500"}
+                className={
+                  !provider
+                    ? "text-amber-500"
+                    : providerStatus === "ok"
+                      ? "text-emerald-500"
+                      : "text-destructive"
+                }
               />
               <div className="flex min-w-0 flex-col text-left leading-tight">
                 <span className="text-xs font-medium">
@@ -268,9 +284,12 @@ export function ChatSidebar({
                     : "Connect a provider"}
                 </span>
                 <span className="truncate text-[11px] text-muted-foreground">
-                  {provider
-                    ? `Key ••••${provider.last4}`
-                    : "Add an API key to start chatting"}
+                  {!provider
+                    ? "Add an API key to start chatting"
+                    : providerStatus === "ok"
+                      ? `Key ••••${provider.last4}`
+                      : PROVIDER_STATUS_LABEL[providerStatus] ??
+                        `Key ••••${provider.last4}`}
                 </span>
               </div>
             </SidebarMenuButton>
