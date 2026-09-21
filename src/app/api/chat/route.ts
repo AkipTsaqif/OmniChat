@@ -200,6 +200,30 @@ export async function POST(request: Request) {
       let full = "";
       const savedToolCalls: ToolCallInfo[] = [];
 
+      // Persist whatever was streamed so a stop/disconnect still leaves the
+      // assistant turn in the transcript instead of a question with no answer.
+      const persist = async () => {
+        if (!full.trim()) return null;
+        const [row] = await db
+          .insert(messages)
+          .values({
+            conversationId,
+            role: "assistant",
+            content: full,
+            modelId,
+            toolCalls: savedToolCalls.length > 0 ? savedToolCalls : null,
+            latencyMs: Date.now() - started,
+          })
+          .returning({ id: messages.id });
+
+        await db
+          .update(conversations)
+          .set({ updatedAt: new Date() })
+          .where(eq(conversations.id, conversationId));
+
+        return row;
+      };
+
       const toolCallsAccumulator: Record<
         number,
         { id: string; name: string; arguments: string }
@@ -304,6 +328,12 @@ export async function POST(request: Request) {
             });
           }
 
+          // Any text streamed before the tool call is a preamble ("let me look
+          // that up"). Keep it for the gateway's context, but restart `full` so
+          // it is not concatenated onto the final answer in the saved message.
+          const preamble = full;
+          full = "";
+
           // 4. Send follow-up request to the gateway to generate final answer using tool output
           const followUpPayload: Record<string, unknown> = {
             model: modelId,
@@ -311,7 +341,7 @@ export async function POST(request: Request) {
               ...promptMessages,
               {
                 role: "assistant",
-                content: full || null,
+                content: preamble || null,
                 tool_calls: toolCalls.map((tc) => ({
                   id: tc.id,
                   type: "function",
@@ -366,43 +396,58 @@ export async function POST(request: Request) {
         }
 
         // Persist once the complete reply and any tool calls are known.
-        const [saved] = await db
-          .insert(messages)
-          .values({
-            conversationId,
-            role: "assistant",
-            content: full,
-            modelId,
-            toolCalls: savedToolCalls.length > 0 ? savedToolCalls : null,
-            latencyMs: Date.now() - started,
-          })
-          .returning({ id: messages.id });
-
-        await db
-          .update(conversations)
-          .set({ updatedAt: new Date() })
-          .where(eq(conversations.id, conversationId));
+        const saved = await persist();
 
         controller.enqueue(
           encoder.encode(
             sse("done", {
-              id: saved.id,
+              id: saved?.id,
               content: full,
               toolCalls: savedToolCalls,
             }),
           ),
         );
       } catch (error) {
-        controller.enqueue(
-          encoder.encode(
-            sse("error", {
-              message:
-                error instanceof Error ? error.message : "Stream failed",
-            }),
-          ),
-        );
+        // An abort is the user pressing stop — keep the partial reply rather
+        // than discarding work the model already produced.
+        const aborted =
+          request.signal.aborted ||
+          (error instanceof Error && error.name === "AbortError");
+
+        try {
+          const saved = await persist();
+          if (saved) {
+            controller.enqueue(
+              encoder.encode(
+                sse("done", {
+                  id: saved.id,
+                  content: full,
+                  toolCalls: savedToolCalls,
+                  stopped: aborted,
+                }),
+              ),
+            );
+          }
+        } catch {
+          // Saving the partial reply is best-effort.
+        }
+
+        if (!aborted) {
+          controller.enqueue(
+            encoder.encode(
+              sse("error", {
+                message:
+                  error instanceof Error ? error.message : "Stream failed",
+              }),
+            ),
+          );
+        }
       } finally {
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // Already closed when the client disconnected.
+        }
       }
     },
   });
