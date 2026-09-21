@@ -1,11 +1,11 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { auth } from "@/auth";
 import { db } from "@/db";
-import { providerSettings } from "@/db/schema";
+import { conversations, providerSettings, users } from "@/db/schema";
 import { encryptSecret } from "@/lib/crypto";
 
 export type SettingsState = { error?: string; ok?: boolean };
@@ -122,4 +122,40 @@ export async function testProviderConnection(input: {
       message: `The gateway ${reason}. Is it running at that URL?`,
     };
   }
+}
+
+export async function saveUserSystemPrompt(
+  prompt: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const userId = await requireUserId();
+  const clean = prompt.trim();
+
+  await db
+    .update(users)
+    .set({ systemPrompt: clean ? clean : null })
+    .where(eq(users.id, userId));
+
+  revalidatePath("/", "layout");
+  return { ok: true };
+}
+
+export async function setConversationSystemPrompt(
+  conversationId: string,
+  prompt: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const userId = await requireUserId();
+  const clean = prompt.trim();
+
+  await db
+    .update(conversations)
+    .set({ systemPrompt: clean ? clean : null, updatedAt: new Date() })
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.userId, userId),
+      ),
+    );
+
+  revalidatePath("/", "layout");
+  return { ok: true };
 }

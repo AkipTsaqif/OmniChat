@@ -4,7 +4,13 @@ export type ProviderId =
   | "google"
   | "meta"
   | "mistral"
+  | "deepseek"
+  | "xai"
+  | "qwen"
+  | "cohere"
   | "unknown";
+
+export type ThinkingLevel = "off" | "low" | "medium" | "high";
 
 export type Provider = {
   id: ProviderId;
@@ -18,7 +24,9 @@ export type Provider = {
 export type Model = {
   id: string;
   name: string;
-  provider: ProviderId;
+  provider: string;
+  providerName?: string;
+  providerMark?: string;
   description: string;
   contextWindow: string;
   badges?: string[];
@@ -28,6 +36,22 @@ export type Model = {
 export type ModelCatalog = Model[];
 
 export type Role = "user" | "assistant";
+
+export type Feedback = "like" | "dislike";
+
+export type SearchResult = {
+  title: string;
+  url: string;
+  snippet: string;
+};
+
+export type ToolCallInfo = {
+  id: string;
+  name: string;
+  query?: string;
+  state: "running" | "done";
+  results?: SearchResult[];
+};
 
 export type Attachment = {
   id: string;
@@ -45,6 +69,8 @@ export type Message = {
   /** Only set for assistant messages. */
   modelId?: string;
   attachments?: Attachment[];
+  toolCalls?: ToolCallInfo[];
+  feedback?: Feedback | null;
   /** Assistant-side telemetry, rendered in the message footer. */
   stats?: {
     tokens: number;
@@ -56,6 +82,7 @@ export type Conversation = {
   id: string;
   title: string;
   modelId: string;
+  systemPrompt?: string | null;
   updatedAt: string;
   /** Grouping bucket used by the sidebar history list. */
   bucket: "Today" | "Yesterday" | "Previous 7 days" | "Older";

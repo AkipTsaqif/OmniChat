@@ -12,6 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 import type { AdapterAccountType } from "next-auth/adapters";
+import type { ToolCallInfo } from "@/lib/types";
 
 export const roleEnum = pgEnum("role", ["user", "assistant"]);
 
@@ -24,6 +25,7 @@ export const users = pgTable("users", {
   /** scrypt hash, `salt:hash` hex. Null for OAuth-only accounts. */
   passwordHash: text("password_hash"),
   plan: text("plan").notNull().default("Free"),
+  systemPrompt: text("system_prompt"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -106,6 +108,7 @@ export const conversations = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     title: text("title").notNull(),
     modelId: text("model_id").notNull(),
+    systemPrompt: text("system_prompt"),
     pinned: boolean("pinned").notNull().default(false),
     archived: boolean("archived").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -138,6 +141,8 @@ export const messages = pgTable(
     attachments: jsonb("attachments").$type<
       { id: string; name: string; size: string; kind: "image" | "file" }[]
     >(),
+    toolCalls: jsonb("tool_calls").$type<ToolCallInfo[]>(),
+    feedback: text("feedback").$type<"like" | "dislike">(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -150,9 +155,45 @@ export const messages = pgTable(
   ],
 );
 
+export const sharedChats = pgTable(
+  "shared_chats",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    modelId: text("model_id").notNull(),
+    messagesSnapshot: jsonb("messages_snapshot")
+      .$type<
+        {
+          id: string;
+          role: "user" | "assistant";
+          content: string;
+          createdAt: string;
+          modelId?: string;
+        }[]
+      >()
+      .notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_shared_chats_conversation").on(table.conversationId),
+  ],
+);
+
 export const usersRelations = relations(users, ({ many, one }) => ({
   conversations: many(conversations),
   providerSettings: one(providerSettings),
+  sharedChats: many(sharedChats),
 }));
 
 export const conversationsRelations = relations(
@@ -163,8 +204,20 @@ export const conversationsRelations = relations(
       references: [users.id],
     }),
     messages: many(messages),
+    sharedChats: many(sharedChats),
   }),
 );
+
+export const sharedChatsRelations = relations(sharedChats, ({ one }) => ({
+  conversation: one(conversations, {
+    fields: [sharedChats.conversationId],
+    references: [conversations.id],
+  }),
+  user: one(users, {
+    fields: [sharedChats.userId],
+    references: [users.id],
+  }),
+}));
 
 export const messagesRelations = relations(messages, ({ one }) => ({
   conversation: one(conversations, {
@@ -176,4 +229,5 @@ export const messagesRelations = relations(messages, ({ one }) => ({
 export type DbUser = typeof users.$inferSelect;
 export type DbConversation = typeof conversations.$inferSelect;
 export type DbMessage = typeof messages.$inferSelect;
+export type DbSharedChat = typeof sharedChats.$inferSelect;
 export type DbProviderSettings = typeof providerSettings.$inferSelect;

@@ -22,9 +22,15 @@ function initialsFor(name: string | null | undefined, email: string) {
     .toUpperCase();
 }
 
-export default async function Page() {
+export default async function ConversationPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
   const session = await auth();
   if (!session?.user?.id) redirect("/login");
+
+  const { id } = await params;
 
   const [conversations, provider, models, systemPrompt] = await Promise.all([
     getConversations(session.user.id),
@@ -33,10 +39,17 @@ export default async function Page() {
     getUserSystemPrompt(session.user.id),
   ]);
 
+  // If conversation doesn't exist or is archived, redirect to /
+  const exists = conversations.some((c) => c.id === id);
+  if (!exists) {
+    redirect("/");
+  }
+
   const email = session.user.email ?? "";
 
   return (
     <ChatView
+      initialActiveId={id}
       conversations={conversations}
       provider={provider}
       models={models}

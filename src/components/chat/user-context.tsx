@@ -7,6 +7,7 @@ export type SessionUser = {
   email: string;
   plan: string;
   initials: string;
+  systemPrompt?: string | null;
 };
 
 export const UserContext = React.createContext<SessionUser>({
@@ -14,6 +15,7 @@ export const UserContext = React.createContext<SessionUser>({
   email: "",
   plan: "",
   initials: "",
+  systemPrompt: null,
 });
 
 export function useSessionUser() {

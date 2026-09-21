@@ -14,6 +14,7 @@ import {
   SettingsIcon,
   SparklesIcon,
   Trash2Icon,
+  WandSparklesIcon,
 } from "lucide-react";
 
 import type { Conversation } from "@/lib/types";
@@ -33,6 +34,7 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -108,7 +110,12 @@ function ConversationItem({
             Rename
           </DropdownMenuItem>
           <DropdownMenuItem
-            onClick={() => run(() => archiveConversation(conversation.id))}
+            onClick={() =>
+              run(async () => {
+                await archiveConversation(conversation.id);
+                if (isActive) onSelect("");
+              })
+            }
           >
             <ArchiveIcon />
             Archive
@@ -116,7 +123,12 @@ function ConversationItem({
           <DropdownMenuSeparator />
           <DropdownMenuItem
             variant="destructive"
-            onClick={() => run(() => deleteConversation(conversation.id))}
+            onClick={() =>
+              run(async () => {
+                await deleteConversation(conversation.id);
+                if (isActive) onSelect("");
+              })
+            }
           >
             <Trash2Icon />
             Delete
@@ -139,7 +151,7 @@ export function ChatSidebar({
   activeId: string | null;
   onSelect: (id: string) => void;
   onNewChat: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (tab?: "provider" | "prompts") => void;
   provider: { provider: string; baseUrl: string; last4: string } | null;
 }) {
   const user = useSessionUser();
@@ -243,7 +255,7 @@ export function ChatSidebar({
           <SidebarMenuItem>
             <SidebarMenuButton
               size="lg"
-              onClick={onOpenSettings}
+              onClick={() => onOpenSettings("provider")}
               className="gap-2 border bg-background"
             >
               <SparklesIcon
@@ -291,20 +303,28 @@ export function ChatSidebar({
                 side="top"
                 className="w-56 min-w-56"
               >
-                <DropdownMenuLabel>{user.email}</DropdownMenuLabel>
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>{user.email}</DropdownMenuLabel>
+                </DropdownMenuGroup>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={onOpenSettings}>
-                  <SettingsIcon />
-                  Provider settings
-                </DropdownMenuItem>
-                <DropdownMenuItem>
-                  <CreditCardIcon />
-                  Billing
-                </DropdownMenuItem>
-                <DropdownMenuItem>
-                  <ArchiveIcon />
-                  Archived chats
-                </DropdownMenuItem>
+                <DropdownMenuGroup>
+                  <DropdownMenuItem onClick={() => onOpenSettings("provider")}>
+                    <SettingsIcon />
+                    Provider settings
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onOpenSettings("prompts")}>
+                    <WandSparklesIcon />
+                    Custom system prompt
+                  </DropdownMenuItem>
+                  <DropdownMenuItem>
+                    <CreditCardIcon />
+                    Billing
+                  </DropdownMenuItem>
+                  <DropdownMenuItem>
+                    <ArchiveIcon />
+                    Archived chats
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   variant="destructive"

@@ -5,28 +5,8 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { providerSettings } from "@/db/schema";
 import { decryptSecret } from "@/lib/crypto";
+import { parseModelInfo } from "@/lib/data";
 import type { Model } from "@/lib/types";
-
-/** Best-effort inference of a vendor from an OpenAI-style model id. */
-function vendorFor(id: string): Model["provider"] {
-  const lower = id.toLowerCase();
-  if (lower.includes("claude") || lower.includes("anthropic")) {
-    return "anthropic";
-  }
-  if (lower.includes("gemini") || lower.includes("google")) return "google";
-  if (lower.includes("llama") || lower.includes("meta")) return "meta";
-  if (lower.includes("mistral") || lower.includes("mixtral")) return "mistral";
-  if (lower.includes("gpt") || lower.includes("o1") || lower.includes("o3")) {
-    return "openai";
-  }
-  return "unknown";
-}
-
-/** Strips a leading `vendor/` segment for display. */
-function displayName(id: string) {
-  const tail = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
-  return tail;
-}
 
 /**
  * Live model list from the user's configured gateway.
@@ -59,20 +39,24 @@ export async function getAvailableModels(userId: string): Promise<Model[]> {
 
     const seen = new Set<string>();
     return (body.data ?? [])
-      .map((entry) => entry.id)
-      .filter((id): id is string => !!id)
-      .filter((id) => {
-        if (seen.has(id)) return false;
-        seen.add(id);
+      .filter((entry): entry is { id: string; owned_by?: string } => !!entry.id)
+      .filter((entry) => {
+        if (seen.has(entry.id)) return false;
+        seen.add(entry.id);
         return true;
       })
-      .map((id) => ({
-        id,
-        name: displayName(id),
-        provider: vendorFor(id),
-        description: id,
-        contextWindow: "",
-      }));
+      .map((entry) => {
+        const info = parseModelInfo(entry.id, entry.owned_by);
+        return {
+          id: entry.id,
+          name: info.modelName,
+          provider: info.providerId,
+          providerName: info.providerName,
+          providerMark: info.providerMark,
+          description: entry.id,
+          contextWindow: "",
+        };
+      });
   } catch {
     // Gateway down or timed out — the caller renders the empty case.
     return [];

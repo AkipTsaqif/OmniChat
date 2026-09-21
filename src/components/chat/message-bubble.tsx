@@ -12,7 +12,7 @@ import {
   ThumbsUpIcon,
 } from "lucide-react";
 
-import type { Message } from "@/lib/types";
+import type { Feedback, Message } from "@/lib/types";
 import { useSessionUser } from "@/components/chat/user-context";
 
 /** Gateways return ids like `anthropic/claude-sonnet-4.5`; show the tail. */
@@ -26,15 +26,22 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Markdown } from "@/components/chat/markdown";
 import { ProviderMark } from "@/components/chat/provider-mark";
+import { ToolCallPill } from "@/components/chat/tool-call-pill";
 
 function IconAction({
   label,
   icon,
   onClick,
+  active,
+  disabled,
+  className,
 }: {
   label: string;
   icon: React.ReactNode;
   onClick?: () => void;
+  active?: boolean;
+  disabled?: boolean;
+  className?: string;
 }) {
   return (
     <Tooltip>
@@ -44,8 +51,13 @@ function IconAction({
             variant="ghost"
             size="icon-xs"
             aria-label={label}
+            disabled={disabled}
             onClick={onClick}
-            className="text-muted-foreground hover:text-foreground"
+            className={cn(
+              "text-muted-foreground hover:text-foreground",
+              active && "bg-accent text-foreground",
+              className,
+            )}
           >
             {icon}
           </Button>
@@ -102,11 +114,33 @@ function Attachments({ message }: { message: Message }) {
 export function MessageBubble({
   message,
   streaming = false,
+  isStreaming = false,
+  onRegenerate,
+  onFeedback,
 }: {
   message: Message;
   streaming?: boolean;
+  isStreaming?: boolean;
+  onRegenerate?: (messageId: string) => void;
+  onFeedback?: (messageId: string, feedback: Feedback | null) => void;
 }) {
   const user = useSessionUser();
+  const [feedbackOverride, setFeedbackOverride] = React.useState<{
+    messageId: string;
+    feedback: Feedback | null;
+  } | null>(null);
+
+  const feedback =
+    feedbackOverride && feedbackOverride.messageId === message.id
+      ? feedbackOverride.feedback
+      : (message.feedback ?? null);
+
+  function handleFeedback(next: Feedback) {
+    const updated = feedback === next ? null : next;
+    setFeedbackOverride({ messageId: message.id, feedback: updated });
+    onFeedback?.(message.id, updated);
+  }
+
   const isUser = message.role === "user";
 
   if (isUser) {
@@ -146,6 +180,10 @@ export function MessageBubble({
             {message.createdAt}
           </span>
         </div>
+        {message.toolCalls?.map((toolCall) => (
+          <ToolCallPill key={toolCall.id} toolCall={toolCall} />
+        ))}
+
         <div className="relative">
           <Markdown content={message.content} />
           {streaming ? (
@@ -155,9 +193,50 @@ export function MessageBubble({
         {streaming ? null : (
         <div className="flex items-center gap-0.5">
           <CopyAction content={message.content} />
-          <IconAction label="Regenerate" icon={<RefreshCwIcon />} />
-          <IconAction label="Good response" icon={<ThumbsUpIcon />} />
-          <IconAction label="Bad response" icon={<ThumbsDownIcon />} />
+          <IconAction
+            label="Regenerate"
+            icon={<RefreshCwIcon className="size-3.5" />}
+            disabled={isStreaming}
+            onClick={() => onRegenerate?.(message.id)}
+          />
+          <IconAction
+            label={feedback === "like" ? "Remove like" : "Good response"}
+            active={feedback === "like"}
+            className={
+              feedback === "like"
+                ? "text-primary hover:text-primary"
+                : undefined
+            }
+            icon={
+              <ThumbsUpIcon
+                className={cn(
+                  "size-3.5",
+                  feedback === "like" && "fill-current text-primary",
+                )}
+              />
+            }
+            onClick={() => handleFeedback("like")}
+          />
+          <IconAction
+            label={
+              feedback === "dislike" ? "Remove dislike" : "Bad response"
+            }
+            active={feedback === "dislike"}
+            className={
+              feedback === "dislike"
+                ? "text-destructive hover:text-destructive"
+                : undefined
+            }
+            icon={
+              <ThumbsDownIcon
+                className={cn(
+                  "size-3.5",
+                  feedback === "dislike" && "fill-current text-destructive",
+                )}
+              />
+            }
+            onClick={() => handleFeedback("dislike")}
+          />
           {message.stats ? (
             <span
               className={cn(

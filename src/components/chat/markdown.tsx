@@ -1,158 +1,202 @@
+"use client";
+
 import * as React from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { CodeBlock } from "@/components/chat/code-block";
 
-/**
- * Deliberately tiny markdown renderer — enough for the hardcoded transcript
- * (fenced code, lists, bold, inline code) without pulling in a parser.
- * Swap for `react-markdown` once real model output arrives.
- */
-
-type Block =
-  | { kind: "code"; language: string; code: string }
-  | { kind: "paragraph"; text: string }
-  | { kind: "bullets"; items: string[] }
-  | { kind: "numbers"; items: string[] };
-
-function parse(source: string): Block[] {
-  const blocks: Block[] = [];
-  const lines = source.split("\n");
-
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index];
-
-    if (line.startsWith("```")) {
-      const language = line.slice(3).trim();
-      const code: string[] = [];
-      index += 1;
-      while (index < lines.length && !lines[index].startsWith("```")) {
-        code.push(lines[index]);
-        index += 1;
-      }
-      index += 1; // closing fence
-      blocks.push({ kind: "code", language, code: code.join("\n") });
-      continue;
-    }
-
-    if (/^\s*[-*]\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) {
-        items.push(lines[index].replace(/^\s*[-*]\s+/, ""));
-        index += 1;
-      }
-      blocks.push({ kind: "bullets", items });
-      continue;
-    }
-
-    if (/^\s*\d+\.\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\s*\d+\.\s+/.test(lines[index])) {
-        items.push(lines[index].replace(/^\s*\d+\.\s+/, ""));
-        index += 1;
-      }
-      blocks.push({ kind: "numbers", items });
-      continue;
-    }
-
-    if (line.trim() === "") {
-      index += 1;
-      continue;
-    }
-
-    const paragraph: string[] = [];
-    while (
-      index < lines.length &&
-      lines[index].trim() !== "" &&
-      !lines[index].startsWith("```") &&
-      !/^\s*[-*]\s+/.test(lines[index]) &&
-      !/^\s*\d+\.\s+/.test(lines[index])
-    ) {
-      paragraph.push(lines[index]);
-      index += 1;
-    }
-    blocks.push({ kind: "paragraph", text: paragraph.join(" ") });
+class MarkdownErrorBoundary extends React.Component<
+  { children: React.ReactNode; fallbackText: string },
+  { hasError: boolean }
+> {
+  constructor(props: { children: React.ReactNode; fallbackText: string }) {
+    super(props);
+    this.state = { hasError: false };
   }
 
-  return blocks;
-}
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
 
-/**
- * Handles `code` and **bold** inside a line of text. Bold is matched first and
- * its body re-entered, so `code` nested inside **bold** renders as both rather
- * than leaking literal backticks.
- */
-function Inline({ text }: { text: string }) {
-  const tokens = text.split(/(\*\*.+?\*\*|`[^`]+`)/g).filter(Boolean);
+  componentDidCatch(error: unknown) {
+    console.error("Markdown rendering error:", error);
+  }
 
-  return (
-    <>
-      {tokens.map((token, i) => {
-        if (token.startsWith("**") && token.endsWith("**")) {
-          return (
-            <strong key={i} className="font-semibold text-foreground">
-              <Inline text={token.slice(2, -2)} />
-            </strong>
-          );
-        }
-        if (token.startsWith("`") && token.endsWith("`")) {
-          return (
-            <code
-              key={i}
-              className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] text-foreground"
-            >
-              {token.slice(1, -1)}
-            </code>
-          );
-        }
-        return <React.Fragment key={i}>{token}</React.Fragment>;
-      })}
-    </>
-  );
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="whitespace-pre-wrap font-sans text-[15px] leading-7">
+          {this.props.fallbackText}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 export function Markdown({ content }: { content: string }) {
-  const blocks = React.useMemo(() => parse(content), [content]);
+  if (!content) return null;
 
   return (
-    <div className="text-[15px] leading-7 text-foreground/90">
-      {blocks.map((block, i) => {
-        if (block.kind === "code") {
-          return (
-            <CodeBlock key={i} language={block.language} code={block.code} />
-          );
-        }
-        if (block.kind === "bullets") {
-          return (
-            <ul key={i} className="my-2 space-y-1.5 pl-5">
-              {block.items.map((item, j) => (
-                <li key={j} className="list-disc marker:text-muted-foreground">
-                  <Inline text={item} />
-                </li>
-              ))}
-            </ul>
-          );
-        }
-        if (block.kind === "numbers") {
-          return (
-            <ol key={i} className="my-2 space-y-1.5 pl-5">
-              {block.items.map((item, j) => (
-                <li
-                  key={j}
-                  className="list-decimal marker:text-muted-foreground"
+    <MarkdownErrorBoundary fallbackText={content}>
+      <div className="text-[15px] leading-7 text-foreground/90">
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            pre({ children }) {
+              // Unnest pre so CodeBlock's custom container doesn't create invalid <pre><div> nesting
+              return <>{children}</>;
+            },
+            code(props) {
+              const { className, children, ...rest } = props;
+              delete (rest as Record<string, unknown>).node;
+              const match = /language-(\w+)/.exec(className || "");
+              const isInline = !match && !String(children).includes("\n");
+
+              if (isInline) {
+                return (
+                  <code
+                    className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] text-foreground"
+                    {...rest}
+                  >
+                    {children}
+                  </code>
+                );
+              }
+
+              return (
+                <CodeBlock
+                  language={match ? match[1] : ""}
+                  code={String(children).replace(/\n$/, "")}
+                />
+              );
+            },
+            ol({ children, ...props }) {
+              return (
+                <ol
+                  className="my-2 space-y-1.5 pl-6 list-decimal marker:text-muted-foreground"
+                  {...props}
                 >
-                  <Inline text={item} />
+                  {children}
+                </ol>
+              );
+            },
+            ul({ children, ...props }) {
+              return (
+                <ul
+                  className="my-2 space-y-1.5 pl-6 list-disc marker:text-muted-foreground"
+                  {...props}
+                >
+                  {children}
+                </ul>
+              );
+            },
+            li({ children, ...props }) {
+              return (
+                <li className="leading-7" {...props}>
+                  {children}
                 </li>
-              ))}
-            </ol>
-          );
-        }
-        return (
-          <p key={i} className="my-2 first:mt-0 last:mb-0">
-            <Inline text={block.text} />
-          </p>
-        );
-      })}
-    </div>
+              );
+            },
+            p({ children, ...props }) {
+              return (
+                <p className="my-2 first:mt-0 last:mb-0 leading-7" {...props}>
+                  {children}
+                </p>
+              );
+            },
+            strong({ children, ...props }) {
+              return (
+                <strong className="font-semibold text-foreground" {...props}>
+                  {children}
+                </strong>
+              );
+            },
+            a({ href, children, ...props }) {
+              return (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-primary underline underline-offset-4 hover:opacity-80"
+                  {...props}
+                >
+                  {children}
+                </a>
+              );
+            },
+            h1({ children, ...props }) {
+              return (
+                <h1
+                  className="mt-4 mb-2 text-xl font-bold tracking-tight text-foreground"
+                  {...props}
+                >
+                  {children}
+                </h1>
+              );
+            },
+            h2({ children, ...props }) {
+              return (
+                <h2
+                  className="mt-3 mb-1.5 text-lg font-semibold tracking-tight text-foreground"
+                  {...props}
+                >
+                  {children}
+                </h2>
+              );
+            },
+            h3({ children, ...props }) {
+              return (
+                <h3
+                  className="mt-2.5 mb-1 text-base font-semibold text-foreground"
+                  {...props}
+                >
+                  {children}
+                </h3>
+              );
+            },
+            blockquote({ children, ...props }) {
+              return (
+                <blockquote
+                  className="my-2 border-l-2 border-primary/40 pl-3 italic text-muted-foreground"
+                  {...props}
+                >
+                  {children}
+                </blockquote>
+              );
+            },
+            table({ children, ...props }) {
+              return (
+                <div className="my-3 overflow-x-auto rounded-lg border">
+                  <table className="w-full text-xs text-left" {...props}>
+                    {children}
+                  </table>
+                </div>
+              );
+            },
+            th({ children, ...props }) {
+              return (
+                <th
+                  className="border-b bg-muted/60 px-3 py-2 font-medium"
+                  {...props}
+                >
+                  {children}
+                </th>
+              );
+            },
+            td({ children, ...props }) {
+              return (
+                <td className="border-b border-border/50 px-3 py-2" {...props}>
+                  {children}
+                </td>
+              );
+            },
+          }}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+    </MarkdownErrorBoundary>
   );
 }

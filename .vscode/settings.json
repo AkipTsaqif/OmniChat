@@ -4,7 +4,7 @@
     "angular": true,
     "jest": true,
     "webpack": true,
-    "next.js": false,
+    "next.js": true,
     "nest.js": true,
     "cypress": true,
     "http-server": true,

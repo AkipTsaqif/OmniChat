@@ -1,15 +1,25 @@
 "use client";
 
 import * as React from "react";
-import { PanelLeftIcon, Share2Icon, StarIcon } from "lucide-react";
+import { useRouter } from "next/navigation";
+import {
+  AlertCircleIcon,
+  PanelLeftIcon,
+  RefreshCwIcon,
+  Share2Icon,
+  StarIcon,
+} from "lucide-react";
 
-import type { Conversation, Message, Model } from "@/lib/types";
+import type { Conversation, Feedback, Message, Model, ThinkingLevel, ToolCallInfo } from "@/lib/types";
 import {
   createUserMessage,
+  prepareRegenerate,
   refreshChat,
   setConversationModel,
+  setMessageFeedback,
   togglePinned,
 } from "@/app/actions";
+import { cn } from "cn";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -29,23 +39,28 @@ import {
 } from "@/components/chat/provider-key-dialog";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { UserContext, type SessionUser } from "@/components/chat/user-context";
+import { ShareDialog } from "@/components/chat/share-dialog";
 
 function ChatHeader({
   title,
   models,
   modelId,
   pinned,
+  canShare,
   onModelChange,
   onTogglePin,
   onConfigure,
+  onShare,
 }: {
   title: string;
   models: Model[];
   modelId: string;
   pinned: boolean;
+  canShare: boolean;
   onModelChange: (id: string) => void;
   onTogglePin: () => void;
   onConfigure: () => void;
+  onShare: () => void;
 }) {
   const { toggleSidebar } = useSidebar();
 
@@ -80,23 +95,36 @@ function ChatHeader({
                 variant="ghost"
                 size="icon-sm"
                 aria-label="Star chat"
-                onClick={onTogglePin}
+                aria-disabled={!canShare}
+                className={cn(!canShare && "opacity-40 cursor-not-allowed")}
+                onClick={() => {
+                  if (canShare) onTogglePin();
+                }}
               >
                 <StarIcon className={pinned ? "fill-current" : undefined} />
               </Button>
             }
           />
-          <TooltipContent>{pinned ? "Unpin" : "Pin"}</TooltipContent>
+          <TooltipContent>{!canShare ? "Start a chat to pin" : pinned ? "Unpin" : "Pin"}</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger
             render={
-              <Button variant="ghost" size="icon-sm" aria-label="Share chat">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Share chat"
+                aria-disabled={!canShare}
+                className={cn(!canShare && "opacity-40 cursor-not-allowed")}
+                onClick={() => {
+                  if (canShare) onShare();
+                }}
+              >
                 <Share2Icon />
               </Button>
             }
           />
-          <TooltipContent>Share</TooltipContent>
+          <TooltipContent>{canShare ? "Share chat" : "Start a chat to share"}</TooltipContent>
         </Tooltip>
         <ThemeToggle />
       </div>
@@ -109,15 +137,44 @@ export function ChatView({
   provider,
   models,
   user,
+  initialActiveId = null,
 }: {
   conversations: Conversation[];
   provider: ProviderSummary;
   models: Model[];
   user: SessionUser;
+  initialActiveId?: string | null;
 }) {
-  const [activeId, setActiveId] = React.useState<string | null>(
-    conversations[0]?.id ?? null,
-  );
+  const router = useRouter();
+  const [prevInitialId, setPrevInitialId] = React.useState(initialActiveId);
+  const [activeId, setActiveId] = React.useState<string | null>(initialActiveId);
+  const [thinkingLevel, setThinkingLevel] = React.useState<ThinkingLevel>("off");
+  const [shareDialogOpen, setShareDialogOpen] = React.useState(false);
+  const [settingsTab, setSettingsTab] = React.useState<"provider" | "prompts">("provider");
+
+  function handleOpenSettings(tab: "provider" | "prompts" = "provider") {
+    setSettingsTab(tab);
+    setKeyDialogOpen(true);
+  }
+
+  if (initialActiveId !== prevInitialId) {
+    setPrevInitialId(initialActiveId);
+    setActiveId(initialActiveId);
+  }
+
+  function handleSelect(id: string) {
+    if (!id) {
+      handleNewChat();
+      return;
+    }
+    setActiveId(id);
+    router.push(`/c/${id}`);
+  }
+
+  function handleNewChat() {
+    setActiveId(null);
+    router.push("/");
+  }
   // Null until the user picks explicitly, so a late-arriving model list (after
   // the key is saved) still supplies a sensible default without an effect.
   const [draftModelId, setDraftModelId] = React.useState<string | null>(null);
@@ -132,6 +189,7 @@ export function ChatView({
   // Local echo of the in-flight exchange, cleared once the server data lands.
   const [localUser, setLocalUser] = React.useState<Message | null>(null);
   const [streamText, setStreamText] = React.useState("");
+  const [streamingToolCalls, setStreamingToolCalls] = React.useState<ToolCallInfo[]>([]);
   const [streaming, setStreaming] = React.useState(false);
   const [streamError, setStreamError] = React.useState<string | null>(null);
 
@@ -159,7 +217,7 @@ export function ChatView({
     });
   }
 
-  async function handleSend(text: string) {
+  async function handleSend(text: string, webSearch: boolean = true) {
     // No gateway, or no model to send to — ask for setup instead of failing.
     if (!provider || !modelId) {
       setKeyDialogOpen(true);
@@ -173,12 +231,13 @@ export function ChatView({
 
     setStreamError(null);
     setLocalUser({
-      id: `local-${Date.now()}`,
+      id: "local-user",
       role: "user",
       content: text,
       createdAt: now,
     });
     setStreamText("");
+    setStreamingToolCalls([]);
     setStreaming(true);
 
     let conversationId = activeId;
@@ -190,6 +249,9 @@ export function ChatView({
       });
       conversationId = created.conversationId;
       setActiveId(conversationId);
+      if (!activeId) {
+        window.history.replaceState(null, "", `/c/${conversationId}`);
+      }
     } catch {
       setStreaming(false);
       setLocalUser(null);
@@ -197,6 +259,15 @@ export function ChatView({
       return;
     }
 
+    await streamResponse(conversationId, modelId, thinkingLevel, webSearch);
+  }
+
+  async function streamResponse(
+    conversationId: string,
+    modelId: string,
+    level: ThinkingLevel = "off",
+    webSearch: boolean = true,
+  ) {
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -204,7 +275,12 @@ export function ChatView({
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId, modelId }),
+        body: JSON.stringify({
+          conversationId,
+          modelId,
+          thinkingLevel: level,
+          webSearch,
+        }),
         signal: controller.signal,
       });
 
@@ -240,6 +316,24 @@ export function ChatView({
           const payload = JSON.parse(dataLine.slice(5).trim());
           if (frame.includes("event: delta")) {
             setStreamText((prev) => prev + payload.delta);
+          } else if (frame.includes("event: tool_start")) {
+            setStreamingToolCalls((prev) => {
+              const existing = prev.find((t) => t.id === payload.id);
+              if (existing) {
+                return prev.map((t) =>
+                  t.id === payload.id ? { ...t, ...payload } : t,
+                );
+              }
+              return [...prev, payload];
+            });
+          } else if (frame.includes("event: tool_done")) {
+            setStreamingToolCalls((prev) => {
+              return prev.map((t) =>
+                t.id === payload.id
+                  ? { ...t, ...payload, state: "done" }
+                  : t,
+              );
+            });
           } else if (frame.includes("event: error")) {
             throw new Error(payload.message);
           }
@@ -252,15 +346,51 @@ export function ChatView({
         );
       }
     } finally {
-      setStreaming(false);
       abortRef.current = null;
-      // Pull the canonical rows, then drop the local echo.
-      startTransition(async () => {
+      try {
         await refreshChat();
+      } finally {
+        setStreaming(false);
         setLocalUser(null);
         setStreamText("");
-      });
+        setStreamingToolCalls([]);
+      }
     }
+  }
+
+  async function handleRegenerate(messageId: string) {
+    if (!provider || !modelId || streaming) {
+      if (!provider || !modelId) setKeyDialogOpen(true);
+      return;
+    }
+
+    setStreamError(null);
+    setStreamText("");
+    setStreaming(true);
+
+    let targetConversationId: string;
+    let targetModelId: string;
+
+    try {
+      const prepared = await prepareRegenerate(messageId);
+      targetConversationId = prepared.conversationId;
+      targetModelId = prepared.modelId || modelId;
+      await refreshChat();
+    } catch (error) {
+      setStreaming(false);
+      setStreamError(
+        error instanceof Error ? error.message : "Failed to regenerate.",
+      );
+      return;
+    }
+
+    await streamResponse(targetConversationId, targetModelId, thinkingLevel);
+  }
+
+  function handleFeedback(messageId: string, feedback: Feedback | null) {
+    startTransition(async () => {
+      await setMessageFeedback(messageId, feedback);
+    });
   }
 
   function handleStop() {
@@ -274,8 +404,41 @@ export function ChatView({
     });
   }
 
+  async function handleRetry() {
+    if (!activeId || streaming) return;
+    setStreamError(null);
+    const lastMsg = active?.messages.at(-1);
+    if (!lastMsg) return;
+
+    if (lastMsg.role === "user") {
+      setStreamText("");
+      setStreamingToolCalls([]);
+      setStreaming(true);
+      await streamResponse(activeId, modelId, thinkingLevel, true);
+    } else if (lastMsg.role === "assistant") {
+      await handleRegenerate(lastMsg.id);
+    }
+  }
+
   const messages = active?.messages ?? [];
-  const showTranscript = messages.length > 0 || localUser || streaming;
+  const lastMessage = messages.at(-1);
+  const lastMessageWasUserAndNoAssistantReply =
+    !streaming && !streamText && lastMessage?.role === "user";
+  const showTranscript =
+    Boolean(activeId) ||
+    messages.length > 0 ||
+    Boolean(localUser) ||
+    streaming ||
+    Boolean(streamText) ||
+    streamingToolCalls.length > 0;
+
+  const chatTitle =
+    active?.title ||
+    (localUser?.content
+      ? localUser.content.length > 40
+        ? `${localUser.content.slice(0, 40)}…`
+        : localUser.content
+      : "New chat");
 
   return (
     <UserContext value={user}>
@@ -283,21 +446,23 @@ export function ChatView({
         <ChatSidebar
           conversations={conversations}
           activeId={activeId}
-          onSelect={setActiveId}
-          onNewChat={() => setActiveId(null)}
-          onOpenSettings={() => setKeyDialogOpen(true)}
+          onSelect={handleSelect}
+          onNewChat={handleNewChat}
+          onOpenSettings={handleOpenSettings}
           provider={provider}
         />
 
         <SidebarInset className="h-svh overflow-hidden">
           <ChatHeader
-            title={active?.title ?? "New chat"}
+            title={chatTitle}
             models={models}
             modelId={modelId}
             pinned={active?.pinned ?? false}
+            canShare={Boolean(active)}
             onModelChange={handleModelChange}
             onTogglePin={handleTogglePin}
-            onConfigure={() => setKeyDialogOpen(true)}
+            onConfigure={() => handleOpenSettings("provider")}
+            onShare={() => setShareDialogOpen(true)}
           />
 
           <div className="flex min-h-0 flex-1 flex-col">
@@ -305,17 +470,24 @@ export function ChatView({
               <div className="flex-1 overflow-y-auto">
                 <div className="mx-auto w-full max-w-3xl px-4 py-6">
                   {messages.map((message) => (
-                    <MessageBubble key={message.id} message={message} />
+                    <MessageBubble
+                      key={message.id}
+                      message={message}
+                      isStreaming={streaming}
+                      onRegenerate={handleRegenerate}
+                      onFeedback={handleFeedback}
+                    />
                   ))}
 
                   {localUser ? <MessageBubble message={localUser} /> : null}
 
-                  {streamText ? (
+                  {streamText || streamingToolCalls.length > 0 ? (
                     <MessageBubble
                       message={{
                         id: "streaming",
                         role: "assistant",
                         content: streamText,
+                        toolCalls: streamingToolCalls,
                         createdAt: "",
                         modelId,
                       }}
@@ -326,9 +498,34 @@ export function ChatView({
                   ) : null}
 
                   {streamError ? (
-                    <p className="my-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                      {streamError}
-                    </p>
+                    <div className="my-3 flex items-center justify-between gap-3 rounded-lg border border-destructive/20 bg-destructive/10 px-3.5 py-2.5 text-sm text-destructive">
+                      <div className="flex items-center gap-2">
+                        <AlertCircleIcon className="size-4 shrink-0" />
+                        <span>{streamError}</span>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleRetry}
+                        className="h-7 shrink-0 gap-1.5 border-destructive/30 text-xs text-destructive hover:bg-destructive/15 cursor-pointer"
+                      >
+                        <RefreshCwIcon className="size-3" />
+                        Retry
+                      </Button>
+                    </div>
+                  ) : lastMessageWasUserAndNoAssistantReply ? (
+                    <div className="my-3 flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3.5 py-2 text-xs text-muted-foreground">
+                      <span>Response was interrupted.</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleRetry}
+                        className="h-7 gap-1.5 text-xs"
+                      >
+                        <RefreshCwIcon className="size-3" />
+                        Generate reply
+                      </Button>
+                    </div>
                   ) : null}
 
                   <div ref={bottomRef} className="h-4" />
@@ -340,7 +537,7 @@ export function ChatView({
                   onPick={handleSend}
                   hasProvider={!!provider && hasModels}
                   isConfigured={!!provider}
-                  onConfigure={() => setKeyDialogOpen(true)}
+                  onConfigure={() => handleOpenSettings("provider")}
                 />
               </div>
             )}
@@ -348,11 +545,14 @@ export function ChatView({
             <Composer
               models={models}
               modelId={modelId}
+              thinkingLevel={thinkingLevel}
+              onThinkingLevelChange={setThinkingLevel}
               onModelChange={handleModelChange}
               isStreaming={streaming}
               onSend={handleSend}
               onStop={handleStop}
-              onConfigure={() => setKeyDialogOpen(true)}
+              onConfigure={() => handleOpenSettings("provider")}
+              onOpenPrompts={() => handleOpenSettings("prompts")}
             />
           </div>
         </SidebarInset>
@@ -362,6 +562,15 @@ export function ChatView({
         open={keyDialogOpen}
         onOpenChange={setKeyDialogOpen}
         current={provider}
+        initialTab={settingsTab}
+        initialSystemPrompt={user.systemPrompt}
+      />
+
+      <ShareDialog
+        open={shareDialogOpen}
+        onOpenChange={setShareDialogOpen}
+        conversationId={active?.id ?? null}
+        conversationTitle={active?.title ?? "Chat"}
       />
     </UserContext>
   );

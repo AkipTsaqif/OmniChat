@@ -3,7 +3,7 @@ import "server-only";
 import { and, asc, desc, eq } from "drizzle-orm";
 
 import { db } from "@/db";
-import { conversations, messages, providerSettings } from "@/db/schema";
+import { conversations, messages, providerSettings, sharedChats, users } from "@/db/schema";
 import type { Conversation, Message } from "@/lib/types";
 
 function bucketFor(date: Date): Conversation["bucket"] {
@@ -49,6 +49,8 @@ function toMessage(row: typeof messages.$inferSelect): Message {
     createdAt: clockTime(row.createdAt),
     modelId: row.modelId ?? undefined,
     attachments: row.attachments ?? undefined,
+    toolCalls: row.toolCalls ?? undefined,
+    feedback: row.feedback ?? undefined,
     stats:
       row.tokens != null && row.latencyMs != null
         ? {
@@ -92,6 +94,7 @@ export async function getConversations(
       id: row.id,
       title: row.title,
       modelId: row.modelId,
+      systemPrompt: row.systemPrompt,
       updatedAt: relativeTime(row.updatedAt),
       bucket: bucketFor(row.updatedAt),
       pinned: row.pinned,
@@ -114,4 +117,33 @@ export async function getProviderSummary(userId: string) {
     .limit(1);
 
   return row ?? null;
+}
+
+export async function getUserSystemPrompt(userId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ systemPrompt: users.systemPrompt })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+
+  return row?.systemPrompt ?? null;
+}
+
+export async function getSharedChat(id: string) {
+  const [row] = await db
+    .select()
+    .from(sharedChats)
+    .where(eq(sharedChats.id, id))
+    .limit(1);
+
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    title: row.title,
+    modelId: row.modelId,
+    messages: row.messagesSnapshot,
+    createdAt: clockTime(row.createdAt),
+    updatedAt: relativeTime(row.updatedAt),
+  };
 }
