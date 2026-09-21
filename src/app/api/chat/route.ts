@@ -381,35 +381,85 @@ export async function POST(request: Request) {
             followUpPayload.reasoning_effort = thinkingLevel;
           }
 
-          const followUpUpstream = await fetch(
-            `${settings.baseUrl}/chat/completions`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${decryptSecret(settings.apiKeyCipher)}`,
-              },
-              body: JSON.stringify(followUpPayload),
-              signal: request.signal,
-            },
-          );
+          // Some routed providers return an empty tool follow-up intermittently
+          // (observed at 80-100% on Sonnet via this gateway) while the identical
+          // payload succeeds on retry. Retry a few times before surfacing it,
+          // since the user has already paid for the search.
+          const MAX_FOLLOW_UP_ATTEMPTS = 3;
+          let followUpText = "";
+          let lastFollowUpError: string | null = null;
 
-          if (!followUpUpstream.ok || !followUpUpstream.body) {
-            const errDetail = await followUpUpstream.text().catch(() => "");
-            throw new Error(
-              errDetail ||
-                `Gateway error on tool follow-up ${followUpUpstream.status}`,
-            );
+          for (
+            let attempt = 1;
+            attempt <= MAX_FOLLOW_UP_ATTEMPTS && !followUpText.trim();
+            attempt++
+          ) {
+            if (attempt > 1) {
+              await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+            }
+
+            let response: Response;
+            try {
+              response = await fetch(`${settings.baseUrl}/chat/completions`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${decryptSecret(settings.apiKeyCipher)}`,
+                },
+                body: JSON.stringify(followUpPayload),
+                signal: request.signal,
+              });
+            } catch (error) {
+              if (request.signal.aborted) throw error;
+              lastFollowUpError =
+                error instanceof Error ? error.message : "Follow-up failed";
+              continue;
+            }
+
+            if (!response.ok || !response.body) {
+              lastFollowUpError =
+                (await response.text().catch(() => "")) ||
+                `Gateway error on tool follow-up ${response.status}`;
+              continue;
+            }
+
+            // Buffer this attempt rather than streaming straight through, so a
+            // failed attempt does not emit a partial answer to the client.
+            let attemptText = "";
+            try {
+              await readSseStream(
+                response,
+                (delta) => {
+                  attemptText += delta;
+                },
+                () => {},
+              );
+            } catch (error) {
+              if (error instanceof GatewayStreamError) {
+                lastFollowUpError = error.message;
+                continue;
+              }
+              throw error;
+            }
+
+            followUpText = attemptText;
           }
 
-          await readSseStream(
-            followUpUpstream,
-            (delta) => {
-              full += delta;
-              controller.enqueue(encoder.encode(sse("delta", { delta })));
-            },
-            () => {},
-          );
+          if (followUpText.trim()) {
+            full += followUpText;
+            controller.enqueue(
+              encoder.encode(sse("delta", { delta: followUpText })),
+            );
+          } else {
+            // Every attempt came back empty — whether the gateway said so
+            // explicitly or just returned nothing. Name the model, because the
+            // fix is to switch models rather than to retry forever.
+            throw new Error(
+              `${modelId} completed the web search but returned no answer after ${MAX_FOLLOW_UP_ATTEMPTS} attempts` +
+                (lastFollowUpError ? ` (${lastFollowUpError})` : "") +
+                ". This model is unreliable with tool calls on your gateway — try another, or turn off web search.",
+            );
+          }
         }
 
         if (!full.trim()) {
