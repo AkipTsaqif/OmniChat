@@ -76,7 +76,7 @@ await page.evaluate(() => {
 await page.type("#apiKey", "sk_omniroute_test");
 for (const b of await page.$$("button")) {
   const label = await page.evaluate((el) => el.textContent, b);
-  if (label?.includes("Save and start chatting")) {
+  if (label?.includes("Save settings")) {
     await b.click();
     break;
   }

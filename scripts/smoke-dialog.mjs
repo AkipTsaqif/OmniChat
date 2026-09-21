@@ -28,7 +28,7 @@ async function run(closeMethod) {
 
   const modalOpen = () =>
     page.evaluate(() =>
-      document.body.innerText.includes("Connect a model provider"),
+      document.body.innerText.includes("Model Provider Gateway"),
     );
 
   // Close the auto-opened modal using the requested method.

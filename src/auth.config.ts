@@ -16,6 +16,10 @@ export const authConfig = {
       const { pathname } = request.nextUrl;
       const isAuthPage = pathname === "/login" || pathname === "/signup";
 
+      // Shared transcripts are deliberately public — gating them behind login
+      // would defeat the purpose of a share link.
+      if (pathname.startsWith("/share/")) return true;
+
       if (isAuthPage) {
         if (signedIn) {
           return Response.redirect(new URL("/", request.nextUrl));

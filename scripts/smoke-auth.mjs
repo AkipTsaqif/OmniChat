@@ -59,7 +59,7 @@ steps.push({
 // 3. Key modal auto-opens for a fresh account
 steps.push({
   step: "provider modal opens on first login",
-  ok: (await text()).includes("Connect a model provider"),
+  ok: (await text()).includes("Model Provider Gateway"),
 });
 
 // 4. Configure the fake gateway
@@ -94,7 +94,7 @@ steps.push({
 // Save
 for (const b of await page.$$("button")) {
   const label = await page.evaluate((el) => el.textContent, b);
-  if (label?.includes("Save and start chatting")) {
+  if (label?.includes("Save settings")) {
     await b.click();
     break;
   }
@@ -140,16 +140,20 @@ steps.push({
   detail: `${rows.length} rows`,
 });
 
-// 6. Reload → history restored from DB
-await page.goto(base, { waitUntil: "networkidle0" });
+// 6. Reload → history restored from DB.
+// Sending rewrites the URL to /c/<id>, so reload that deep link rather than
+// the bare root, which intentionally opens a fresh chat.
+const convoUrl = page.url();
+await page.goto(convoUrl, { waitUntil: "networkidle0" });
 await wait(1200);
 steps.push({
   step: "history survives reload",
   ok: (await text()).includes("Streaming works end to end"),
+  detail: convoUrl.replace(base, ""),
 });
 steps.push({
   step: "provider modal stays closed once configured",
-  ok: !(await text()).includes("Connect a model provider"),
+  ok: !(await text()).includes("Model Provider Gateway"),
 });
 
 // 7. Data isolation: a second account in a clean session sees nothing
