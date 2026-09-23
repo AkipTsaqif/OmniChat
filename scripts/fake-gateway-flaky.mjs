@@ -21,7 +21,11 @@ http.createServer(async (req, res) => {
   }
   if (req.url?.endsWith("/chat/completions")) {
     const body = await new Promise(r => { let s=""; req.on("data",c=>s+=c); req.on("end",()=>r(s)); });
-    const isFollowUp = body.includes('"role":"tool"');
+    // A follow-up is either the tool round trip (role:"tool") or the flattened
+    // fallback that inlines the results as text. Both must be treated as
+    // follow-ups, or the fallback gets a first-turn tool call back.
+    const isFollowUp =
+      body.includes('"role":"tool"') || body.includes("Web search results:");
     res.writeHead(200, {"Content-Type":"text/event-stream","Cache-Control":"no-cache, no-transform"});
     const send = o => res.write(`data: ${JSON.stringify(o)}\n\n`);
 

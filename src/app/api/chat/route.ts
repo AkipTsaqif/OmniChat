@@ -2,10 +2,17 @@ import { and, asc, eq } from "drizzle-orm";
 
 import { auth } from "@/auth";
 import { db } from "@/db";
-import { conversations, messages, providerSettings, users } from "@/db/schema";
+import {
+  conversations,
+  messages,
+  providerSettings,
+  searchSettings,
+  users,
+} from "@/db/schema";
 import { decryptSecret } from "@/lib/crypto";
-import { searchWeb } from "@/lib/tools/web-search";
-import type { SearchResult, ToolCallInfo } from "@/lib/types";
+import { searchWeb, type SearchConfig } from "@/lib/tools/web-search";
+import { fetchPage } from "@/lib/tools/fetch-page";
+import type { ToolCallInfo } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,8 +43,41 @@ const WEB_SEARCH_TOOL = {
   },
 };
 
+const FETCH_PAGE_TOOL = {
+  type: "function",
+  function: {
+    name: "fetch_page",
+    description:
+      "Download a web page and return its readable text. Use this after web_search when you need the actual content of a specific result — an FAQ, terms and conditions, a spec, a price list — rather than just its search snippet.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Absolute http(s) URL of the page to read",
+        },
+      },
+      required: ["url"],
+    },
+  },
+};
+
 function sse(event: string, data: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+/**
+ * A stored key whose passphrase has changed since it was written is
+ * undecryptable. Treat it as absent rather than failing the whole chat turn —
+ * web search is a convenience, not a precondition.
+ */
+function safeDecrypt(cipher: string | null | undefined): string | null {
+  if (!cipher) return null;
+  try {
+    return decryptSecret(cipher);
+  } catch {
+    return null;
+  }
 }
 
 /** An error the gateway reported inside the SSE body rather than via status. */
@@ -46,6 +86,30 @@ class GatewayStreamError extends Error {
     super(message);
     this.name = "GatewayStreamError";
   }
+}
+
+type ToolAccumulator = Record<
+  number,
+  { id: string; name: string; arguments: string }
+>;
+
+/** Folds one streamed tool-call delta into its accumulator entry. */
+function foldToolDelta(acc: ToolAccumulator, tc: {
+  index?: number;
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}) {
+  const idx = tc.index ?? 0;
+  if (!acc[idx]) {
+    acc[idx] = {
+      id: tc.id || `call_${Date.now()}_${idx}`,
+      name: "",
+      arguments: "",
+    };
+  }
+  if (tc.id) acc[idx].id = tc.id;
+  if (tc.function?.name) acc[idx].name += tc.function.name;
+  if (tc.function?.arguments) acc[idx].arguments += tc.function.arguments;
 }
 
 async function readSseStream(
@@ -134,6 +198,24 @@ export async function POST(request: Request) {
     return new Response("No provider configured", { status: 428 });
   }
 
+  // Per-user search configuration, falling back to environment variables so a
+  // fresh install works with no database row at all.
+  const [searchPrefs] = await db
+    .select()
+    .from(searchSettings)
+    .where(eq(searchSettings.userId, userId))
+    .limit(1);
+
+  const searchConfig: SearchConfig = {
+    preferred: (searchPrefs?.preferred ?? "auto") as SearchConfig["preferred"],
+    tavilyApiKey:
+      safeDecrypt(searchPrefs?.tavilyApiKeyCipher) ??
+      process.env.TAVILY_API_KEY ??
+      null,
+    searxngUrl:
+      searchPrefs?.searxngUrl?.trim() || process.env.OMNICHAT_SEARX_URL || null,
+  };
+
   // Confirm ownership before reading the transcript.
   const [conversation] = await db
     .select({
@@ -185,7 +267,7 @@ export async function POST(request: Request) {
 
   // Enable web search tools by default unless explicitly turned off
   if (webSearch !== false) {
-    requestPayload.tools = [WEB_SEARCH_TOOL];
+    requestPayload.tools = [WEB_SEARCH_TOOL, FETCH_PAGE_TOOL];
   }
 
   if (thinkingLevel && thinkingLevel !== "off") {
@@ -273,24 +355,46 @@ export async function POST(request: Request) {
           },
         );
 
-        const toolCalls = Object.values(toolCallsAccumulator);
+        // A model may call tools more than once in a turn — search, then read a
+        // page it found. Executing only the first round and discarding the rest
+        // cut turns off mid-thought: the model would announce "let me check the
+        // FAQ" and then go silent, because the call that followed was dropped.
+        // Loop until it answers, and say so plainly if it never does.
+        const MAX_TOOL_ROUNDS = 3;
+        let pendingToolCalls = Object.values(toolCallsAccumulator);
+        let convoMessages: Record<string, unknown>[] = [...promptMessages];
+        let rounds = 0;
 
-        // If the model requested tool execution (e.g. web search):
-        if (toolCalls.length > 0) {
+        while (pendingToolCalls.length > 0) {
+          if (rounds >= MAX_TOOL_ROUNDS) {
+            throw new Error(
+              `${modelId} was still calling tools after ${MAX_TOOL_ROUNDS} rounds and never produced an answer — its last message was an interim note, not a reply. Try asking again, or turn off web search.`,
+            );
+          }
+          rounds++;
+
           const toolResultsForGateway: {
             role: "tool";
             tool_call_id: string;
             content: string;
           }[] = [];
 
-          for (const tc of toolCalls) {
+          for (const tc of pendingToolCalls) {
             let query = "";
+            let targetUrl = "";
             try {
               const parsed = JSON.parse(tc.arguments);
               query = parsed.query || parsed.q || parsed.search || "";
+              targetUrl = parsed.url || parsed.href || parsed.link || "";
             } catch {
               query = tc.arguments.replace(/["{}:]/g, "").trim();
             }
+
+            // fetch_page reads a page; web_search is the only other tool.
+            // Matched on "fetch" so a mangled or aliased name cannot make the
+            // search tool get treated as a page read.
+            const isFetch = tc.name.includes("fetch");
+            const subject = isFetch ? targetUrl : query;
 
             // 1. Notify frontend: live tool execution started
             controller.enqueue(
@@ -298,48 +402,92 @@ export async function POST(request: Request) {
                 sse("tool_start", {
                   id: tc.id,
                   name: tc.name,
-                  query,
+                  query: subject,
                   state: "running",
                 }),
               ),
             );
 
-            // 2. Perform the web search
-            let results: SearchResult[] = [];
-            if (tc.name === "web_search" || tc.name.includes("search")) {
-              results = await searchWeb(query);
+            // 2. Run the tool. Whatever comes back, the model must be told the
+            // truth about whether anything was actually retrieved — "nothing
+            // found" and "could not look" are different facts.
+            let toolContent = "";
+            let donePayload: Record<string, unknown> = {
+              id: tc.id,
+              name: tc.name,
+              query: subject,
+            };
+
+            if (isFetch) {
+              try {
+                const page = await fetchPage(subject);
+                toolContent =
+                  `Page: ${page.title}\nURL: ${page.url}\n\n${page.text}` +
+                  (page.truncated
+                    ? "\n\n[The page continues beyond this point — content was truncated.]"
+                    : "");
+                donePayload = {
+                  ...donePayload,
+                  state: "done",
+                  url: page.url,
+                  title: page.title,
+                  excerpt: page.text.slice(0, 300),
+                };
+              } catch (error) {
+                const reason =
+                  error instanceof Error ? error.message : "the request failed";
+                toolContent = `The page could not be read: ${reason} Do not pretend to have read it — say so, or answer from the search results you already have.`;
+                donePayload = { ...donePayload, state: "failed", error: reason };
+              }
+            } else {
+              const outcome = await searchWeb(subject, 5, searchConfig);
+              const results = outcome.ok ? outcome.results : [];
+
+              toolContent = outcome.ok
+                ? results.length > 0
+                  ? JSON.stringify(
+                      results.map((r) => ({
+                        title: r.title,
+                        url: r.url,
+                        snippet: r.snippet,
+                      })),
+                    )
+                  : "The web search ran but found no results for this query. Say that you found nothing — do not substitute an answer from memory as though you had checked."
+                : `The web search did NOT run: ${outcome.reason}. Do not pretend to have searched. If the answer depends on current information, tell the user you were unable to verify it.`;
+
+              donePayload = {
+                ...donePayload,
+                state: outcome.ok ? "done" : "failed",
+                source: outcome.ok ? outcome.source : undefined,
+                error: outcome.ok ? undefined : outcome.reason,
+                results,
+              };
             }
 
-            // 3. Notify frontend: tool results ready
-            controller.enqueue(
-              encoder.encode(
-                sse("tool_done", {
-                  id: tc.id,
-                  name: tc.name,
-                  query,
-                  state: "done",
-                  results,
-                }),
-              ),
-            );
-
-            const toolContent =
-              results.length > 0
-                ? JSON.stringify(
-                    results.map((r) => ({
-                      title: r.title,
-                      url: r.url,
-                      snippet: r.snippet,
-                    })),
-                  )
-                : "No live web search results were found for this query. Please answer the user's prompt directly based on your knowledge.";
+            // 3. Notify frontend. "done" and "failed" are different states and
+            // the pill must not blur them.
+            controller.enqueue(encoder.encode(sse("tool_done", donePayload)));
 
             savedToolCalls.push({
               id: tc.id,
               name: tc.name,
-              query,
-              state: "done",
-              results,
+              query: subject || undefined,
+              url: isFetch ? targetUrl || undefined : undefined,
+              title:
+                typeof donePayload.title === "string"
+                  ? donePayload.title
+                  : undefined,
+              excerpt:
+                typeof donePayload.excerpt === "string"
+                  ? donePayload.excerpt
+                  : undefined,
+              state: (donePayload.state as "done" | "failed") ?? "failed",
+              source: donePayload.source as never,
+              error:
+                typeof donePayload.error === "string"
+                  ? donePayload.error
+                  : undefined,
+              results: (donePayload.results as never) ?? undefined,
             });
 
             toolResultsForGateway.push({
@@ -355,49 +503,76 @@ export async function POST(request: Request) {
           const preamble = full;
           full = "";
 
-          // 4. Send follow-up request to the gateway to generate final answer using tool output
-          const followUpPayload: Record<string, unknown> = {
+          convoMessages = [
+            ...convoMessages,
+            {
+              role: "assistant",
+              content: preamble || null,
+              tool_calls: pendingToolCalls.map((tc) => ({
+                id: tc.id,
+                type: "function",
+                function: { name: tc.name, arguments: tc.arguments },
+              })),
+            },
+            ...toolResultsForGateway,
+          ];
+
+          // 5. Ask the gateway to turn the tool output into the final answer.
+          //
+          // Two shapes, tried in order. The first is the correct OpenAI contract
+          // and works fine on OpenAI/OpenRouter. Measured against OmniRoute's
+          // Anthropic backend it returned a zero-content completion on EVERY
+          // attempt (0/4 to 0/6 across every possible `content` value on the
+          // assistant turn), surfacing as an in-band
+          // `{"error":{"message":"Provider returned empty content"}}` on an HTTP
+          // 200. Handing the identical results over as a plain message — no tool
+          // round trip at all — measured 6/6. So keep the correct shape first and
+          // fall back to the flattened one rather than failing the whole turn.
+          const extraFields =
+            thinkingLevel && thinkingLevel !== "off"
+              ? { reasoning_effort: thinkingLevel }
+              : {};
+
+          const roundTripPayload: Record<string, unknown> = {
             model: modelId,
-            messages: [
-              ...promptMessages,
-              {
-                role: "assistant",
-                content: preamble || null,
-                tool_calls: toolCalls.map((tc) => ({
-                  id: tc.id,
-                  type: "function",
-                  function: {
-                    name: tc.name,
-                    arguments: tc.arguments,
-                  },
-                })),
-              },
-              ...toolResultsForGateway,
-            ],
+            messages: convoMessages,
             stream: true,
+            ...extraFields,
           };
 
-          if (thinkingLevel && thinkingLevel !== "off") {
-            followUpPayload.reasoning_effort = thinkingLevel;
-          }
+          const flattenedPayload: Record<string, unknown> = {
+            model: modelId,
+            messages: [
+              // Everything before this round's assistant turn and tool results.
+              ...convoMessages.slice(0, -2),
+              ...(preamble ? [{ role: "assistant", content: preamble }] : []),
+              {
+                role: "user",
+                content:
+                  `Web search results:\n${toolResultsForGateway
+                    .map((t) => t.content)
+                    .join("\n")}\n\n` +
+                  "Answer the user's request using these results and cite sources by URL where relevant. " +
+                  "If the results are insufficient, say so plainly rather than answering from memory.",
+              },
+            ],
+            stream: true,
+            ...extraFields,
+          };
 
-          // Some routed providers return an empty tool follow-up intermittently
-          // (observed at 80-100% on Sonnet via this gateway) while the identical
-          // payload succeeds on retry. Retry a few times before surfacing it,
-          // since the user has already paid for the search.
-          const MAX_FOLLOW_UP_ATTEMPTS = 3;
           let followUpText = "";
+          let followUpCalls: {
+            id: string;
+            name: string;
+            arguments: string;
+          }[] = [];
           let lastFollowUpError: string | null = null;
 
-          for (
-            let attempt = 1;
-            attempt <= MAX_FOLLOW_UP_ATTEMPTS && !followUpText.trim();
-            attempt++
-          ) {
-            if (attempt > 1) {
-              await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
-            }
-
+          /**
+           * One attempt, buffered rather than streamed straight through, so a
+           * failed attempt does not emit a partial answer to the client.
+           */
+          const attemptFollowUp = async (payload: Record<string, unknown>) => {
             let response: Response;
             try {
               response = await fetch(`${settings.baseUrl}/chat/completions`, {
@@ -406,60 +581,107 @@ export async function POST(request: Request) {
                   "Content-Type": "application/json",
                   Authorization: `Bearer ${decryptSecret(settings.apiKeyCipher)}`,
                 },
-                body: JSON.stringify(followUpPayload),
+                body: JSON.stringify(payload),
                 signal: request.signal,
               });
             } catch (error) {
               if (request.signal.aborted) throw error;
-              lastFollowUpError =
-                error instanceof Error ? error.message : "Follow-up failed";
-              continue;
+              return {
+                text: "",
+                toolCalls: [],
+                error:
+                  error instanceof Error ? error.message : "Follow-up failed",
+              };
             }
 
             if (!response.ok || !response.body) {
-              lastFollowUpError =
-                (await response.text().catch(() => "")) ||
-                `Gateway error on tool follow-up ${response.status}`;
-              continue;
+              return {
+                text: "",
+                toolCalls: [],
+                error:
+                  (await response.text().catch(() => "")) ||
+                  `Gateway error on tool follow-up ${response.status}`,
+              };
             }
 
-            // Buffer this attempt rather than streaming straight through, so a
-            // failed attempt does not emit a partial answer to the client.
-            let attemptText = "";
+            let text = "";
+            const acc: ToolAccumulator = {};
             try {
               await readSseStream(
                 response,
                 (delta) => {
-                  attemptText += delta;
+                  text += delta;
                 },
-                () => {},
+                (tc) => foldToolDelta(acc, tc),
               );
             } catch (error) {
               if (error instanceof GatewayStreamError) {
-                lastFollowUpError = error.message;
-                continue;
+                return { text: "", toolCalls: [], error: error.message };
               }
               throw error;
             }
 
-            followUpText = attemptText;
+            return {
+              text,
+              toolCalls: Object.values(acc),
+              error: null as string | null,
+            };
+          };
+
+          // A routed provider can return an empty follow-up intermittently while
+          // the identical payload succeeds on retry, so give each shape a few
+          // tries — the user has already paid for the search.
+          const phases = [
+            { label: "tool round trip", payload: roundTripPayload, attempts: 3 },
+            { label: "simplified retry", payload: flattenedPayload, attempts: 2 },
+          ];
+
+          // A round that comes back with only tool calls is a valid round, not a
+          // failure — the model is mid-turn and wants another action.
+          const answered = () =>
+            !!followUpText.trim() || followUpCalls.length > 0;
+
+          let totalAttempts = 0;
+          for (const phase of phases) {
+            for (
+              let attempt = 1;
+              attempt <= phase.attempts && !answered();
+              attempt++
+            ) {
+              totalAttempts++;
+              if (attempt > 1) {
+                await new Promise((resolve) =>
+                  setTimeout(resolve, 400 * attempt),
+                );
+              }
+              const result = await attemptFollowUp(phase.payload);
+              if (result.error) lastFollowUpError = result.error;
+              if (result.text.trim()) followUpText = result.text;
+              if (result.toolCalls.length > 0) followUpCalls = result.toolCalls;
+            }
+            if (answered()) break;
           }
 
-          if (followUpText.trim()) {
-            full += followUpText;
-            controller.enqueue(
-              encoder.encode(sse("delta", { delta: followUpText })),
-            );
+          if (answered()) {
+            if (followUpText.trim()) {
+              full += followUpText;
+              controller.enqueue(
+                encoder.encode(sse("delta", { delta: followUpText })),
+              );
+            }
           } else {
-            // Every attempt came back empty — whether the gateway said so
-            // explicitly or just returned nothing. Name the model, because the
-            // fix is to switch models rather than to retry forever.
+            // Both shapes came back empty. Name the model so the user knows which
+            // turn failed, but do NOT call it bad at tool calls — the measured
+            // failure is the gateway's tool round trip, and blaming the model
+            // sends the user off to swap models for nothing.
             throw new Error(
-              `${modelId} completed the web search but returned no answer after ${MAX_FOLLOW_UP_ATTEMPTS} attempts` +
+              `${modelId} completed the web search but returned no answer after ${totalAttempts} attempts, including a simplified retry without the tool round trip` +
                 (lastFollowUpError ? ` (${lastFollowUpError})` : "") +
-                ". This model is unreliable with tool calls on your gateway — try another, or turn off web search.",
+                ". The tool round trip is failing at the gateway rather than at the model — try a different gateway, or turn off web search.",
             );
           }
+
+          pendingToolCalls = followUpCalls;
         }
 
         if (!full.trim()) {
