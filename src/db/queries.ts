@@ -3,7 +3,7 @@ import "server-only";
 import { and, asc, desc, eq } from "drizzle-orm";
 
 import { db } from "@/db";
-import { conversations, messages, providerSettings, sharedChats, users } from "@/db/schema";
+import { conversations, messages, providerSettings, searchSettings, sharedChats, users } from "@/db/schema";
 import type { Conversation, Message } from "@/lib/types";
 
 function bucketFor(date: Date): Conversation["bucket"] {
@@ -114,6 +114,21 @@ export async function getProviderSummary(userId: string) {
     })
     .from(providerSettings)
     .where(eq(providerSettings.userId, userId))
+    .limit(1);
+
+  return row ?? null;
+}
+
+/** Non-secret summary of the web search settings, safe for the client. */
+export async function getSearchSummary(userId: string) {
+  const [row] = await db
+    .select({
+      preferred: searchSettings.preferred,
+      tavilyLast4: searchSettings.tavilyApiKeyLast4,
+      searxngUrl: searchSettings.searxngUrl,
+    })
+    .from(searchSettings)
+    .where(eq(searchSettings.userId, userId))
     .limit(1);
 
   return row ?? null;

@@ -96,6 +96,30 @@ export const providerSettings = pgTable("provider_settings", {
 });
 
 /* ---------------------------------------------------------------- *
+ * Web search settings
+ * ---------------------------------------------------------------- */
+
+export const searchSettings = pgTable("search_settings", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  /**
+   * Which engine to try first. Everything else is still tried as a fallback,
+   * with DuckDuckGo last as the keyless floor.
+   */
+  preferred: text("preferred").notNull().default("auto"),
+  /** AES-256-GCM ciphertext. Null when the user has not supplied a key. */
+  tavilyApiKeyCipher: text("tavily_api_key_cipher"),
+  /** Last 4 characters, safe to display for recognition. */
+  tavilyApiKeyLast4: text("tavily_api_key_last4"),
+  /** Base URL of a self-hosted SearXNG instance. */
+  searxngUrl: text("searxng_url"),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+/* ---------------------------------------------------------------- *
  * Chat
  * ---------------------------------------------------------------- */
 
@@ -193,6 +217,7 @@ export const sharedChats = pgTable(
 export const usersRelations = relations(users, ({ many, one }) => ({
   conversations: many(conversations),
   providerSettings: one(providerSettings),
+  searchSettings: one(searchSettings),
   sharedChats: many(sharedChats),
 }));
 
@@ -231,3 +256,4 @@ export type DbConversation = typeof conversations.$inferSelect;
 export type DbMessage = typeof messages.$inferSelect;
 export type DbSharedChat = typeof sharedChats.$inferSelect;
 export type DbProviderSettings = typeof providerSettings.$inferSelect;
+export type DbSearchSettings = typeof searchSettings.$inferSelect;

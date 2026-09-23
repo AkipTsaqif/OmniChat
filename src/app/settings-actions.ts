@@ -6,8 +6,8 @@ import { and, eq } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/db";
 import { checkProviderHealth } from "@/db/models";
-import { conversations, providerSettings, users } from "@/db/schema";
-import { encryptSecret } from "@/lib/crypto";
+import { conversations, providerSettings, searchSettings, users } from "@/db/schema";
+import { encryptSecret, decryptSecret } from "@/lib/crypto";
 import type { ProviderStatus } from "@/lib/types";
 
 export type SettingsState = { error?: string; ok?: boolean };
@@ -181,4 +181,205 @@ export async function recheckProvider(): Promise<{
     message: health.message,
     modelCount: health.models.length,
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Web search
+ * ------------------------------------------------------------------ */
+
+export type SearchSettingsState = { error?: string; ok?: boolean };
+
+const SEARCH_PREFERENCES = ["auto", "tavily", "searxng", "duckduckgo"] as const;
+
+/**
+ * Saves the web search chain configuration.
+ *
+ * A blank Tavily key means "keep the one I already saved" — the field doubles
+ * as its own placeholder, so re-saving without retyping the key must not erase
+ * it. Use `clearTavilyKey` to deliberately remove one.
+ */
+export async function saveSearchSettings(
+  _prev: SearchSettingsState,
+  formData: FormData,
+): Promise<SearchSettingsState> {
+  const userId = await requireUserId();
+
+  const preferred = String(formData.get("searchPreferred") ?? "auto");
+  const tavilyApiKey = String(formData.get("tavilyApiKey") ?? "").trim();
+  const searxngUrl = String(formData.get("searxngUrl") ?? "").trim();
+
+  if (!SEARCH_PREFERENCES.includes(preferred as (typeof SEARCH_PREFERENCES)[number])) {
+    return { error: "Choose a valid search engine." };
+  }
+
+  let normalisedUrl: string | null = null;
+  if (searxngUrl) {
+    let parsed: URL;
+    try {
+      parsed = new URL(searxngUrl);
+    } catch {
+      return {
+        error: "That SearXNG URL is not valid. Include http:// or https://.",
+      };
+    }
+    if (!/^https?:$/.test(parsed.protocol)) {
+      return { error: "The SearXNG URL must start with http:// or https://." };
+    }
+    // Normalise: strip trailing slashes so we can append /search.
+    normalisedUrl = searxngUrl.replace(/\/+$/, "");
+  }
+
+  const [existing] = await db
+    .select({
+      tavilyApiKeyCipher: searchSettings.tavilyApiKeyCipher,
+      tavilyApiKeyLast4: searchSettings.tavilyApiKeyLast4,
+    })
+    .from(searchSettings)
+    .where(eq(searchSettings.userId, userId))
+    .limit(1);
+
+  const cipher = tavilyApiKey
+    ? encryptSecret(tavilyApiKey)
+    : (existing?.tavilyApiKeyCipher ?? null);
+  const last4 = tavilyApiKey
+    ? tavilyApiKey.slice(-4)
+    : (existing?.tavilyApiKeyLast4 ?? null);
+
+  const values = {
+    userId,
+    preferred,
+    tavilyApiKeyCipher: cipher,
+    tavilyApiKeyLast4: last4,
+    searxngUrl: normalisedUrl,
+    updatedAt: new Date(),
+  };
+
+  await db
+    .insert(searchSettings)
+    .values(values)
+    .onConflictDoUpdate({
+      target: searchSettings.userId,
+      set: values,
+    });
+
+  revalidatePath("/");
+  return { ok: true };
+}
+
+export async function clearTavilyKey(): Promise<{ ok: boolean }> {
+  const userId = await requireUserId();
+
+  await db
+    .update(searchSettings)
+    .set({ tavilyApiKeyCipher: null, tavilyApiKeyLast4: null, updatedAt: new Date() })
+    .where(eq(searchSettings.userId, userId));
+
+  revalidatePath("/");
+  return { ok: true };
+}
+
+/** Verifies a search backend answers before we save it. */
+export async function testSearchConnection(input: {
+  source: "tavily" | "searxng";
+  tavilyApiKey?: string;
+  searxngUrl?: string;
+}): Promise<{ ok: boolean; message: string }> {
+  const userId = await requireUserId();
+
+  if (input.source === "tavily") {
+    let key = input.tavilyApiKey?.trim() ?? "";
+
+    // Re-testing a saved key: the plaintext is not on the client, so resolve it
+    // from the stored cipher rather than demanding it be retyped.
+    if (!key) {
+      const [stored] = await db
+        .select({ cipher: searchSettings.tavilyApiKeyCipher })
+        .from(searchSettings)
+        .where(eq(searchSettings.userId, userId))
+        .limit(1);
+      if (stored?.cipher) {
+        try {
+          key = decryptSecret(stored.cipher);
+        } catch {
+          key = "";
+        }
+      }
+    }
+
+    if (!key) return { ok: false, message: "Enter your Tavily API key first." };
+
+    try {
+      const response = await fetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({ query: "ping", max_results: 1, search_depth: "basic" }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (response.status === 401 || response.status === 403) {
+        return { ok: false, message: "Tavily rejected that API key." };
+      }
+      if (response.status === 429) {
+        return {
+          ok: false,
+          message: "Tavily is rate limiting this key — the free quota may be spent.",
+        };
+      }
+      if (!response.ok) {
+        return { ok: false, message: `Tavily responded ${response.status}.` };
+      }
+      return { ok: true, message: "Connected to Tavily." };
+    } catch {
+      return { ok: false, message: "Tavily could not be reached." };
+    }
+  }
+
+  const base =
+    input.searxngUrl?.trim().replace(/\/+$/, "") ||
+    (
+      await db
+        .select({ url: searchSettings.searxngUrl })
+        .from(searchSettings)
+        .where(eq(searchSettings.userId, userId))
+        .limit(1)
+    )[0]?.url?.replace(/\/+$/, "") ||
+    "";
+  if (!base) return { ok: false, message: "Enter the SearXNG URL first." };
+
+  try {
+    const url = new URL(`${base}/search`);
+    url.searchParams.set("q", "ping");
+    url.searchParams.set("format", "json");
+
+    const response = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (response.status === 403) {
+      return {
+        ok: false,
+        message:
+          "SearXNG refused the request. Enable the `json` format and set `limiter: false` in its settings.yml.",
+      };
+    }
+    if (!response.ok) {
+      return { ok: false, message: `SearXNG responded ${response.status}.` };
+    }
+    try {
+      await response.json();
+    } catch {
+      return {
+        ok: false,
+        message: "SearXNG did not return JSON. Enable the `json` format in settings.yml.",
+      };
+    }
+    return { ok: true, message: "Connected to SearXNG." };
+  } catch {
+    return {
+      ok: false,
+      message: "SearXNG could not be reached. Is it running at that URL?",
+    };
+  }
 }

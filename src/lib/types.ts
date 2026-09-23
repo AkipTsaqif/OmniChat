@@ -54,11 +54,41 @@ export type SearchResult = {
   snippet: string;
 };
 
+/** A single page reduced to readable text by the `fetch_page` tool. */
+export type PageContent = {
+  url: string;
+  title: string;
+  text: string;
+  /** True when the text hit the length cap and the page continues. */
+  truncated: boolean;
+};
+
+/** Which backend actually answered a search. */
+export type SearchSource = "tavily" | "searxng" | "duckduckgo";
+
+/**
+ * `ok: true` with zero results is a genuine empty set — the web had nothing.
+ * `ok: false` means no backend produced an answer at all. The two must never be
+ * conflated: the first is a finding, the second is an inability to check.
+ */
+export type SearchOutcome =
+  | { ok: true; source: SearchSource; results: SearchResult[] }
+  | { ok: false; reason: string };
+
 export type ToolCallInfo = {
   id: string;
   name: string;
+  /** Search query, for `web_search`. */
   query?: string;
-  state: "running" | "done";
+  /** Page read, for `fetch_page`. */
+  url?: string;
+  title?: string;
+  excerpt?: string;
+  state: "running" | "done" | "failed";
+  /** Which backend answered, when one did. */
+  source?: SearchSource;
+  /** Why the tool ran but produced nothing usable. */
+  error?: string;
   results?: SearchResult[];
 };
 

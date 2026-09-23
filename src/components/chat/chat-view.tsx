@@ -44,6 +44,7 @@ import { ModelPicker } from "@/components/chat/model-picker";
 import {
   ProviderKeyDialog,
   type ProviderSummary,
+  type SearchSummary,
 } from "@/components/chat/provider-key-dialog";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { UserContext, type SessionUser } from "@/components/chat/user-context";
@@ -155,6 +156,7 @@ function subscribeToStreamError(onChange: () => void) {
 export function ChatView({
   conversations,
   provider,
+  search,
   models,
   providerStatus = "none",
   providerMessage = null,
@@ -163,6 +165,7 @@ export function ChatView({
 }: {
   conversations: Conversation[];
   provider: ProviderSummary;
+  search?: SearchSummary;
   models: Model[];
   providerStatus?: ProviderStatus;
   providerMessage?: string | null;
@@ -174,9 +177,13 @@ export function ChatView({
   const [activeId, setActiveId] = React.useState<string | null>(initialActiveId);
   const [thinkingLevel, setThinkingLevel] = React.useState<ThinkingLevel>("off");
   const [shareDialogOpen, setShareDialogOpen] = React.useState(false);
-  const [settingsTab, setSettingsTab] = React.useState<"provider" | "prompts">("provider");
+  const [settingsTab, setSettingsTab] = React.useState<
+    "provider" | "prompts" | "search"
+  >("provider");
 
-  function handleOpenSettings(tab: "provider" | "prompts" = "provider") {
+  function handleOpenSettings(
+    tab: "provider" | "prompts" | "search" = "provider",
+  ) {
     setSettingsTab(tab);
     setKeyDialogOpen(true);
   }
@@ -636,6 +643,7 @@ export function ChatView({
         current={provider}
         initialTab={settingsTab}
         initialSystemPrompt={user.systemPrompt}
+        initialSearch={search}
       />
 
       <ShareDialog

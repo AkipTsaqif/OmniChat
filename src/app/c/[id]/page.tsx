@@ -6,6 +6,7 @@ import { checkProviderHealth } from "@/db/models";
 import {
   getConversations,
   getProviderSummary,
+  getSearchSummary,
   getUserSystemPrompt,
 } from "@/db/queries";
 
@@ -32,12 +33,14 @@ export default async function ConversationPage({
 
   const { id } = await params;
 
-  const [conversations, provider, health, systemPrompt] = await Promise.all([
-    getConversations(session.user.id),
-    getProviderSummary(session.user.id),
-    checkProviderHealth(session.user.id),
-    getUserSystemPrompt(session.user.id),
-  ]);
+  const [conversations, provider, health, systemPrompt, search] =
+    await Promise.all([
+      getConversations(session.user.id),
+      getProviderSummary(session.user.id),
+      checkProviderHealth(session.user.id),
+      getUserSystemPrompt(session.user.id),
+      getSearchSummary(session.user.id),
+    ]);
 
   // If conversation doesn't exist or is archived, redirect to /
   const exists = conversations.some((c) => c.id === id);
@@ -52,6 +55,7 @@ export default async function ConversationPage({
       initialActiveId={id}
       conversations={conversations}
       provider={provider}
+      search={search}
       models={health.models}
       providerStatus={health.status}
       providerMessage={health.message}
