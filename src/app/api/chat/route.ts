@@ -416,10 +416,28 @@ export async function POST(request: Request) {
         let convoMessages: Record<string, unknown>[] = [...promptMessages];
         let rounds = 0;
 
+        // Diagnostics for a turn that never lands. A bare "was still calling
+        // tools" says nothing about why, and the next occurrence needs to
+        // diagnose itself rather than leave us guessing between a stuck model
+        // and a search backend that returned nothing three times.
+        const toolDiagnostics: string[] = [];
+        const callCounts = new Map<string, number>();
+        let toolCallsMade = 0;
+        let toolCallsFailed = 0;
+
         while (pendingToolCalls.length > 0) {
           if (rounds >= MAX_TOOL_ROUNDS) {
+            const everyToolFailed =
+              toolCallsMade > 0 && toolCallsFailed === toolCallsMade;
             throw new Error(
-              `${modelId} was still calling tools after ${MAX_TOOL_ROUNDS} rounds and never produced an answer — its last message was an interim note, not a reply. Try asking again, or turn off web search.`,
+              `${modelId} was still calling tools after ${MAX_TOOL_ROUNDS} rounds and never produced an answer — its last message was an interim note, not a reply.` +
+                (toolDiagnostics.length > 0
+                  ? ` What it tried: ${toolDiagnostics.join("; ")}.`
+                  : "") +
+                (everyToolFailed
+                  ? " Every tool call came back empty, so the model kept retrying it instead of answering — the search backend is the problem, not the model."
+                  : " The model kept asking for further actions instead of answering.") +
+                " Try again, or turn off web search.",
             );
           }
           rounds++;
@@ -446,6 +464,24 @@ export async function POST(request: Request) {
             // search tool get treated as a page read.
             const isFetch = tc.name.includes("fetch");
             const subject = isFetch ? targetUrl : query;
+
+            // Loop detection. A model that asks for the exact same thing it has
+            // already run is stuck, not thinking — executing it again just
+            // burns a round and hides the real cause. One identical retry is
+            // allowed (a transient failure is worth a second go); the third is
+            // a loop and stops here, with what the call returned last time.
+            const callKey = `${isFetch ? "fetch" : "search"}\u0000${subject.trim().toLowerCase()}`;
+            const seen = (callCounts.get(callKey) ?? 0) + 1;
+            callCounts.set(callKey, seen);
+            if (seen > 2) {
+              const previous = toolDiagnostics.at(-1) ?? "no recorded result";
+              throw new Error(
+                `${modelId} asked for the same tool call three times and never answered. ` +
+                  `Repeated: ${isFetch ? "fetch_page" : "web_search"}(${subject || "(no argument)"}), ` +
+                  `which last returned: ${previous}. ` +
+                  "This is a stuck loop rather than a slow search. Try again, or turn off web search.",
+              );
+            }
 
             // 1. Notify frontend: live tool execution started
             controller.enqueue(
@@ -504,7 +540,7 @@ export async function POST(request: Request) {
                       })),
                     )
                   : "The web search ran but found no results for this query. Say that you found nothing — do not substitute an answer from memory as though you had checked."
-                : `The web search did NOT run: ${outcome.reason}. Do not pretend to have searched. If the answer depends on current information, tell the user you were unable to verify it.`;
+                : `The web search did NOT run: ${outcome.reason}. Do not pretend to have searched, and do not repeat this same search — it will fail again. If the answer depends on current information, tell the user you were unable to verify it.`;
 
               donePayload = {
                 ...donePayload,
@@ -518,6 +554,18 @@ export async function POST(request: Request) {
             // 3. Notify frontend. "done" and "failed" are different states and
             // the pill must not blur them.
             controller.enqueue(encoder.encode(sse("tool_done", donePayload)));
+
+            toolCallsMade++;
+            const failed = donePayload.state === "failed";
+            if (failed) toolCallsFailed++;
+            toolDiagnostics.push(
+              `${isFetch ? "fetch_page" : "web_search"}(${subject || "(no argument)"}) -> ` +
+                (failed
+                  ? `failed: ${donePayload.error ?? "unknown reason"}`
+                  : isFetch
+                    ? "read a page"
+                    : `${Array.isArray(donePayload.results) ? donePayload.results.length : 0} results`),
+            );
 
             savedToolCalls.push({
               id: tc.id,

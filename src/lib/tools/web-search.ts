@@ -11,6 +11,16 @@ import type { SearchOutcome, SearchSource, SearchResult } from "@/lib/types";
 
 const TIMEOUT_MS = 8_000;
 
+/**
+ * DuckDuckGo Lite throttles rapid successive requests from one address. A
+ * tool chain that searches three times in three seconds will get the first two
+ * answered and the third dropped — which looks like a broken parser and reads
+ * to the model like "search failed, try again", producing a retry loop. A
+ * small floor between calls avoids manufacturing that failure ourselves.
+ */
+const DDG_MIN_INTERVAL_MS = 500;
+let lastDuckDuckGoCall = 0;
+
 export type SearchPreference = "auto" | SearchSource;
 
 export type SearchConfig = {
@@ -273,6 +283,10 @@ async function runDuckDuckGo(
   query: string,
   limit: number,
 ): Promise<SearchResult[]> {
+  const wait = lastDuckDuckGoCall + DDG_MIN_INTERVAL_MS - Date.now();
+  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  lastDuckDuckGoCall = Date.now();
+
   const response = await fetch("https://lite.duckduckgo.com/lite/", {
     method: "POST",
     headers: {
@@ -300,5 +314,10 @@ async function runDuckDuckGo(
   }
   if (/no results/i.test(html)) return [];
 
-  throw new Error("returned no recognisable results (blocked, or markup changed)");
+  // No result list at all and no explicit "no results" notice. In practice
+  // this is a rate limit or a bot check, not a markup change — say which, so
+  // the caller does not go hunting for a parsing bug that is not there.
+  throw new Error(
+    "returned no result list — most likely rate limiting or a bot check. Pause before searching again",
+  );
 }
