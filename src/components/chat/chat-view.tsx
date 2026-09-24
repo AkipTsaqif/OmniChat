@@ -224,11 +224,11 @@ export function ChatView({
   const [thinkingLevel, setThinkingLevel] = React.useState<ThinkingLevel>("off");
   const [shareDialogOpen, setShareDialogOpen] = React.useState(false);
   const [settingsTab, setSettingsTab] = React.useState<
-    "provider" | "prompts" | "search"
+    "provider" | "prompts" | "search" | "memory"
   >("provider");
 
   function handleOpenSettings(
-    tab: "provider" | "prompts" | "search" = "provider",
+    tab: "provider" | "prompts" | "search" | "memory" | "memory" = "provider",
   ) {
     setSettingsTab(tab);
     setKeyDialogOpen(true);

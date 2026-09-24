@@ -12,6 +12,8 @@ import {
   PlusIcon,
   SearchIcon,
   SettingsIcon,
+  BrainIcon,
+  GlobeIcon,
   SparklesIcon,
   Trash2Icon,
   WandSparklesIcon,
@@ -160,7 +162,7 @@ export function ChatSidebar({
   activeId: string | null;
   onSelect: (id: string) => void;
   onNewChat: () => void;
-  onOpenSettings: (tab?: "provider" | "prompts") => void;
+  onOpenSettings: (tab?: "provider" | "prompts" | "search" | "memory") => void;
   provider: { provider: string; baseUrl: string; last4: string } | null;
   providerStatus?: ProviderStatus;
 }) {
@@ -330,6 +332,14 @@ export function ChatSidebar({
                   <DropdownMenuItem onClick={() => onOpenSettings("provider")}>
                     <SettingsIcon />
                     Provider settings
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onOpenSettings("search")}>
+                    <GlobeIcon />
+                    Web search
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onOpenSettings("memory")}>
+                    <BrainIcon />
+                    Memory
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => onOpenSettings("prompts")}>
                     <WandSparklesIcon />
