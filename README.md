@@ -11,6 +11,8 @@ A self-hosted, multi-provider LLM chat interface. OmniChat stores users and conv
 - OmniRoute, OpenAI, OpenRouter, and custom OpenAI-compatible gateways
 - Live model discovery through the gateway's `/models` endpoint
 - Streaming chat completions through Server-Sent Events
+- Cross-chat memory — facts you explicitly save, injected into later
+  conversations and switchable per chat
 - Responsive shadcn/Tailwind interface with light and dark themes
 
 ## Stack
@@ -79,6 +81,27 @@ http://localhost:20128/v1
 ```
 
 The app tests the gateway through `/models` and sends streaming requests to `/chat/completions`. Provider keys are encrypted on the server and never returned to the browser.
+
+## Memory
+
+OmniChat can carry facts between conversations. It is deliberately **not**
+automatic: nothing becomes a memory without a click.
+
+- Click the bookmark beside the thumbs buttons on any reply to save a fact.
+  The text is visible and editable before anything is stored.
+- After a turn, OmniChat may **suggest** one — it never saves on its own. This
+  costs one extra gateway call per turn and can be switched off in
+  *Settings → Memory*.
+- Use the brain icon in the chat header to turn memory **off for one
+  conversation** — a clean room for questions you do not want biased.
+- *Settings → Memory* lists everything remembered, with edit, deactivate,
+  delete, and a "use everywhere / this chat only" scope switch.
+
+Memories are stored per account and are never visible to other users, never
+included in share links, and injected as background context rather than
+instructions.
+
+No extra environment variables are required.
 
 ## Scripts
 

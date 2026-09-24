@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "auto_suggest_memory" boolean DEFAULT true NOT NULL;

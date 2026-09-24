@@ -26,6 +26,12 @@ export const users = pgTable("users", {
   passwordHash: text("password_hash"),
   plan: text("plan").notNull().default("Free"),
   systemPrompt: text("system_prompt"),
+  /**
+   * Whether to offer a memory suggestion after each turn. This costs one extra
+   * gateway call per turn, so it is switchable — and it only ever suggests,
+   * never saves.
+   */
+  autoSuggestMemory: boolean("auto_suggest_memory").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -135,6 +141,11 @@ export const conversations = pgTable(
     systemPrompt: text("system_prompt"),
     pinned: boolean("pinned").notNull().default(false),
     archived: boolean("archived").notNull().default(false),
+    /**
+     * Whether cross-chat memory may be injected into this conversation. Off
+     * means a clean room: a generic question gets no remembered context.
+     */
+    memoryEnabled: boolean("memory_enabled").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -214,11 +225,63 @@ export const sharedChats = pgTable(
   ],
 );
 
+/* ---------------------------------------------------------------- *
+ * Cross-chat memory
+ * ---------------------------------------------------------------- */
+
+/**
+ * A fact the user asked us to keep between conversations.
+ *
+ * `conversationId` is nullable and does double duty: NULL means the memory is
+ * global and applies everywhere; non-null means it is scoped to that one
+ * conversation (and carries provenance along with `sourceMessageId`).
+ *
+ * `content` is written as a standalone sentence — it will be read out of
+ * context and injected into prompts that never saw the conversation it came
+ * from.
+ */
+export const memories = pgTable(
+  "memories",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** null = global; non-null = only in that conversation. */
+    conversationId: uuid("conversation_id").references(() => conversations.id, {
+      onDelete: "cascade",
+    }),
+    /** 'preference' | 'personal' | 'project' | 'constraint'. */
+    category: text("category").notNull().default("preference"),
+    content: text("content").notNull(),
+    /** Provenance — lets the UI say "from our chat on 21 Sep". */
+    sourceMessageId: uuid("source_message_id").references(() => messages.id, {
+      onDelete: "set null",
+    }),
+    /** 'active' | 'archived'. Archived is a soft forget, not a delete. */
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_memories_user").on(
+      table.userId,
+      table.status,
+      table.createdAt.desc(),
+    ),
+  ],
+);
+
 export const usersRelations = relations(users, ({ many, one }) => ({
   conversations: many(conversations),
   providerSettings: one(providerSettings),
   searchSettings: one(searchSettings),
   sharedChats: many(sharedChats),
+  memories: many(memories),
 }));
 
 export const conversationsRelations = relations(
@@ -230,6 +293,7 @@ export const conversationsRelations = relations(
     }),
     messages: many(messages),
     sharedChats: many(sharedChats),
+    memories: many(memories),
   }),
 );
 
@@ -244,11 +308,27 @@ export const sharedChatsRelations = relations(sharedChats, ({ one }) => ({
   }),
 }));
 
-export const messagesRelations = relations(messages, ({ one }) => ({
+export const memoriesRelations = relations(memories, ({ one }) => ({
+  user: one(users, {
+    fields: [memories.userId],
+    references: [users.id],
+  }),
+  conversation: one(conversations, {
+    fields: [memories.conversationId],
+    references: [conversations.id],
+  }),
+  sourceMessage: one(messages, {
+    fields: [memories.sourceMessageId],
+    references: [messages.id],
+  }),
+}));
+
+export const messagesRelations = relations(messages, ({ one, many }) => ({
   conversation: one(conversations, {
     fields: [messages.conversationId],
     references: [conversations.id],
   }),
+  memories: many(memories),
 }));
 
 export type DbUser = typeof users.$inferSelect;
@@ -257,3 +337,4 @@ export type DbMessage = typeof messages.$inferSelect;
 export type DbSharedChat = typeof sharedChats.$inferSelect;
 export type DbProviderSettings = typeof providerSettings.$inferSelect;
 export type DbSearchSettings = typeof searchSettings.$inferSelect;
+export type DbMemory = typeof memories.$inferSelect;

@@ -1,10 +1,18 @@
 import "server-only";
 
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
 
 import { db } from "@/db";
-import { conversations, messages, providerSettings, searchSettings, sharedChats, users } from "@/db/schema";
-import type { Conversation, Message } from "@/lib/types";
+import {
+  conversations,
+  memories,
+  messages,
+  providerSettings,
+  searchSettings,
+  sharedChats,
+  users,
+} from "@/db/schema";
+import type { Conversation, Memory, Message } from "@/lib/types";
 
 function bucketFor(date: Date): Conversation["bucket"] {
   const startOfToday = new Date();
@@ -39,6 +47,11 @@ function clockTime(date: Date): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** "21 Sep" — a memory is dated, not timestamped; the hour is not the point. */
+function dateStamp(date: Date): string {
+  return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
 function toMessage(row: typeof messages.$inferSelect): Message {
@@ -98,6 +111,7 @@ export async function getConversations(
       updatedAt: relativeTime(row.updatedAt),
       bucket: bucketFor(row.updatedAt),
       pinned: row.pinned,
+      memoryEnabled: row.memoryEnabled,
       preview: list.at(-1)?.content.slice(0, 120) ?? "",
       messages: list,
     };
@@ -132,6 +146,107 @@ export async function getSearchSummary(userId: string) {
     .limit(1);
 
   return row ?? null;
+}
+
+/**
+ * Active memories that apply to a conversation: global ones plus those scoped
+ * to it. Hard-filtered on userId — memories must never cross accounts.
+ */
+export async function getMemories(
+  userId: string,
+  conversationId: string | null,
+  limit = 50,
+): Promise<Memory[]> {
+  const rows = await db
+    .select({
+      id: memories.id,
+      category: memories.category,
+      content: memories.content,
+      conversationId: memories.conversationId,
+      sourceMessageId: memories.sourceMessageId,
+      sourceCreatedAt: messages.createdAt,
+      status: memories.status,
+      createdAt: memories.createdAt,
+    })
+    .from(memories)
+    .leftJoin(messages, eq(memories.sourceMessageId, messages.id))
+    .where(
+      and(
+        eq(memories.userId, userId),
+        eq(memories.status, "active"),
+        conversationId
+          ? or(
+              isNull(memories.conversationId),
+              eq(memories.conversationId, conversationId),
+            )
+          : isNull(memories.conversationId),
+      ),
+    )
+    .orderBy(desc(memories.createdAt))
+    .limit(limit);
+
+  return rows.map((row) => ({
+    id: row.id,
+    category: row.category as Memory["category"],
+    content: row.content,
+    conversationId: row.conversationId,
+    sourceMessageId: row.sourceMessageId,
+    sourceCreatedAt: row.sourceCreatedAt
+      ? dateStamp(row.sourceCreatedAt)
+      : undefined,
+    status: row.status as Memory["status"],
+    createdAt: dateStamp(row.createdAt),
+  }));
+}
+
+/**
+ * Every memory, active and archived, for the Memory panel. Also hard-filtered
+ * on userId — this is the one place a list is rendered, so it is the one place
+ * an isolation mistake would show.
+ */
+export async function getMemorySummary(userId: string): Promise<Memory[]> {
+  const rows = await db
+    .select({
+      id: memories.id,
+      category: memories.category,
+      content: memories.content,
+      conversationId: memories.conversationId,
+      sourceMessageId: memories.sourceMessageId,
+      sourceCreatedAt: messages.createdAt,
+      status: memories.status,
+      createdAt: memories.createdAt,
+    })
+    .from(memories)
+    .leftJoin(messages, eq(memories.sourceMessageId, messages.id))
+    .where(eq(memories.userId, userId))
+    .orderBy(desc(memories.createdAt))
+    .limit(500);
+
+  return rows.map((row) => ({
+    id: row.id,
+    category: row.category as Memory["category"],
+    content: row.content,
+    conversationId: row.conversationId,
+    sourceMessageId: row.sourceMessageId,
+    sourceCreatedAt: row.sourceCreatedAt
+      ? dateStamp(row.sourceCreatedAt)
+      : undefined,
+    status: row.status as Memory["status"],
+    createdAt: dateStamp(row.createdAt),
+  }));
+}
+
+/** Whether the post-turn memory suggestion is enabled for this user. */
+export async function getMemoryPrefs(
+  userId: string,
+): Promise<{ autoSuggestMemory: boolean }> {
+  const [row] = await db
+    .select({ autoSuggestMemory: users.autoSuggestMemory })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+
+  return { autoSuggestMemory: row?.autoSuggestMemory ?? true };
 }
 
 export async function getUserSystemPrompt(userId: string): Promise<string | null> {

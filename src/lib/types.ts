@@ -48,6 +48,37 @@ export type Role = "user" | "assistant";
 
 export type Feedback = "like" | "dislike";
 
+/** Why a memory was kept — drives phrasing and grouping in the UI. */
+export type MemoryCategory =
+  | "preference"
+  | "personal"
+  | "project"
+  | "constraint";
+
+/**
+ * A fact the user asked us to keep between conversations.
+ * `conversationId` is null for global memories, set for scoped ones.
+ */
+export type Memory = {
+  id: string;
+  category: MemoryCategory;
+  /** Written as a standalone sentence — it is read out of context. */
+  content: string;
+  /** null = applies everywhere; non-null = only in that conversation. */
+  conversationId: string | null;
+  sourceMessageId: string | null;
+  /** Clock time of the source message, for "from our chat on 21 Sep". */
+  sourceCreatedAt?: string;
+  status: "active" | "archived";
+  createdAt: string;
+};
+
+/** A proposed fact — offered to the user, never saved without a click. */
+export type MemorySuggestion = {
+  category: MemoryCategory;
+  content: string;
+};
+
 export type SearchResult = {
   title: string;
   url: string;
@@ -126,6 +157,8 @@ export type Conversation = {
   /** Grouping bucket used by the sidebar history list. */
   bucket: "Today" | "Yesterday" | "Previous 7 days" | "Older";
   pinned?: boolean;
+  /** Whether memory may be injected into this conversation. */
+  memoryEnabled: boolean;
   preview: string;
   messages: Message[];
 };

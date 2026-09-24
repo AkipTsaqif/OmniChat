@@ -4,6 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertCircleIcon,
+  BrainIcon,
   CheckCircle2Icon,
   CheckIcon,
   EyeIcon,
@@ -15,6 +16,7 @@ import {
   Trash2Icon,
   WandSparklesIcon,
 } from "lucide-react";
+import { cn } from "cn";
 
 import {
   clearTavilyKey,
@@ -26,7 +28,16 @@ import {
   type SearchSettingsState,
   type SettingsState,
 } from "@/app/settings-actions";
+import {
+  deactivateAllMemories,
+  deleteMemory,
+  setAutoSuggestMemory,
+  setMemoryScope,
+  setMemoryStatus,
+  updateMemory,
+} from "@/app/actions";
 import { GATEWAYS, getGateway } from "@/lib/providers";
+import type { Memory, MemoryCategory } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -37,6 +48,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -106,6 +118,158 @@ const PROMPT_PRESETS = [
   },
 ];
 
+const MEMORY_CATEGORIES: { id: MemoryCategory; name: string }[] = [
+  { id: "preference", name: "Preference" },
+  { id: "personal", name: "Personal" },
+  { id: "project", name: "Project" },
+  { id: "constraint", name: "Constraint" },
+];
+
+/** One remembered fact, with its edit / deactivate / scope / delete controls. */
+function MemoryRow({ memory }: { memory: Memory }) {
+  const [editing, setEditing] = React.useState(false);
+  const [content, setContent] = React.useState(memory.content);
+  const [category, setCategory] = React.useState<MemoryCategory>(
+    memory.category,
+  );
+  const [busy, setBusy] = React.useState(false);
+
+  async function run(action: () => Promise<unknown>) {
+    setBusy(true);
+    try {
+      await action();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const archived = memory.status === "archived";
+
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-2.5 text-xs",
+        archived && "opacity-50",
+      )}
+    >
+      {editing ? (
+        <>
+          <Textarea
+            rows={2}
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            className="text-xs"
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Select
+              value={category}
+              onValueChange={(v) => v && setCategory(v as MemoryCategory)}
+            >
+              <SelectTrigger size="sm" className="h-7 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {MEMORY_CATEGORIES.map((option) => (
+                  <SelectItem key={option.id} value={option.id}>
+                    {option.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              size="sm"
+              className="h-7 text-xs"
+              disabled={busy || !content.trim()}
+              onClick={() =>
+                run(async () => {
+                  await updateMemory(memory.id, { content, category });
+                  setEditing(false);
+                })
+              }
+            >
+              Save
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs"
+              onClick={() => {
+                setContent(memory.content);
+                setCategory(memory.category);
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="leading-relaxed">{memory.content}</p>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
+            <span className="rounded-full bg-muted px-1.5 py-0.5 font-medium">
+              {memory.category}
+            </span>
+            <span>
+              {memory.conversationId ? "This chat only" : "All conversations"}
+            </span>
+            {memory.sourceCreatedAt ? (
+              <span>from our chat · {memory.sourceCreatedAt}</span>
+            ) : null}
+          </div>
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            <Button
+              size="xs"
+              variant="ghost"
+              className="h-6 text-[11px]"
+              disabled={busy}
+              onClick={() => setEditing(true)}
+            >
+              Edit
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              className="h-6 text-[11px]"
+              disabled={busy}
+              onClick={() =>
+                run(() =>
+                  setMemoryStatus(
+                    memory.id,
+                    archived ? "active" : "archived",
+                  ),
+                )
+              }
+            >
+              {archived ? "Restore" : "Deactivate"}
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              className="h-6 text-[11px]"
+              disabled={busy || archived}
+              onClick={() =>
+                run(() => setMemoryScope(memory.id, !!memory.conversationId))
+              }
+            >
+              {memory.conversationId ? "Use everywhere" : "This chat only"}
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              className="h-6 text-[11px] hover:text-destructive"
+              disabled={busy}
+              onClick={() => run(() => deleteMemory(memory.id))}
+            >
+              <Trash2Icon className="size-3" />
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function ProviderKeyDialog({
   open,
   onOpenChange,
@@ -113,15 +277,21 @@ export function ProviderKeyDialog({
   initialTab = "provider",
   initialSystemPrompt = null,
   initialSearch = null,
+  memories = [],
+  memoryAutoSuggest = true,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   current: ProviderSummary;
-  initialTab?: "provider" | "prompts" | "search";
+  initialTab?: "provider" | "prompts" | "search" | "memory";
   initialSystemPrompt?: string | null;
   initialSearch?: SearchSummary;
+  memories?: Memory[];
+  memoryAutoSuggest?: boolean;
 }) {
-  const [tab, setTab] = React.useState<"provider" | "prompts" | "search">(
+  const [tab, setTab] = React.useState<
+    "provider" | "prompts" | "search" | "memory"
+  >(
     initialTab,
   );
   const [prevInitialTab, setPrevInitialTab] = React.useState(initialTab);
@@ -285,18 +455,22 @@ export function ProviderKeyDialog({
           onValueChange={(v) => setTab(v as "provider" | "prompts")}
         >
           <div className="border-b pb-3">
-            <TabsList className="grid w-full grid-cols-3">
+            <TabsList className="grid w-full grid-cols-4">
               <TabsTrigger value="provider" className="gap-2">
                 <KeyRoundIcon className="size-4" />
                 <span>Provider</span>
               </TabsTrigger>
               <TabsTrigger value="search" className="gap-2">
                 <SearchIcon className="size-4" />
-                <span>Web Search</span>
+                <span>Search</span>
+              </TabsTrigger>
+              <TabsTrigger value="memory" className="gap-2">
+                <BrainIcon className="size-4" />
+                <span>Memory</span>
               </TabsTrigger>
               <TabsTrigger value="prompts" className="gap-2">
                 <WandSparklesIcon className="size-4" />
-                <span>System Prompt</span>
+                <span>Prompt</span>
               </TabsTrigger>
             </TabsList>
           </div>
@@ -654,6 +828,62 @@ export function ProviderKeyDialog({
                 </Button>
               </DialogFooter>
             </form>
+          </TabsContent>
+
+          {/* Memory Tab */}
+          <TabsContent value="memory" className="pt-2">
+            <DialogHeader className="mb-3">
+              <DialogTitle>Memory</DialogTitle>
+              <DialogDescription>
+                Facts you asked OmniChat to keep across conversations. Nothing
+                is saved without your click, and anything here can be edited,
+                deactivated, or deleted.
+              </DialogDescription>
+            </DialogHeader>
+
+            <label className="flex items-start justify-between gap-3 rounded-lg border px-3 py-2.5 text-xs">
+              <span>
+                <span className="font-medium">
+                  Suggest a memory after each turn
+                </span>
+                <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                  Costs one extra gateway call per turn. Never saves on its own.
+                </span>
+              </span>
+              <Switch
+                checked={memoryAutoSuggest}
+                onCheckedChange={(checked: boolean) =>
+                  void setAutoSuggestMemory(checked)
+                }
+              />
+            </label>
+
+            <div className="mt-3 max-h-80 space-y-2 overflow-y-auto">
+              {memories.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  Nothing remembered yet. Use the bookmark beside the thumbs
+                  buttons on any reply to save a fact.
+                </p>
+              ) : (
+                memories.map((memory) => (
+                  <MemoryRow key={memory.id} memory={memory} />
+                ))
+              )}
+            </div>
+
+            {memories.some((m) => m.status === "active") ? (
+              <DialogFooter className="mt-3 sm:justify-end">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => void deactivateAllMemories()}
+                >
+                  Deactivate all
+                </Button>
+              </DialogFooter>
+            ) : null}
           </TabsContent>
 
           {/* System Prompt Tab */}

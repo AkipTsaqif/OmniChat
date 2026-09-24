@@ -4,6 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertCircleIcon,
+  BrainIcon,
   PanelLeftIcon,
   RefreshCwIcon,
   Share2Icon,
@@ -13,6 +14,8 @@ import {
 import type {
   Conversation,
   Feedback,
+  Memory,
+  MemorySuggestion,
   Message,
   Model,
   ProviderStatus,
@@ -23,8 +26,10 @@ import {
   createUserMessage,
   prepareRegenerate,
   refreshChat,
+  setConversationMemoryEnabled,
   setConversationModel,
   setMessageFeedback,
+  suggestMemory,
   togglePinned,
 } from "@/app/actions";
 import { cn } from "cn";
@@ -60,6 +65,8 @@ function ChatHeader({
   onTogglePin,
   onConfigure,
   onShare,
+  memoryEnabled = true,
+  onToggleMemory,
 }: {
   title: string;
   models: Model[];
@@ -70,6 +77,9 @@ function ChatHeader({
   onTogglePin: () => void;
   onConfigure: () => void;
   onShare: () => void;
+  /** Per-conversation clean room: off means no remembered context is injected. */
+  memoryEnabled?: boolean;
+  onToggleMemory?: () => void;
 }) {
   const { toggleSidebar } = useSidebar();
 
@@ -135,6 +145,36 @@ function ChatHeader({
           />
           <TooltipContent>{canShare ? "Share chat" : "Start a chat to share"}</TooltipContent>
         </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Memory"
+                aria-disabled={!canShare}
+                className={cn(
+                  !canShare && "opacity-40 cursor-not-allowed",
+                  memoryEnabled && canShare && "text-primary",
+                )}
+                onClick={() => {
+                  if (canShare) onToggleMemory?.();
+                }}
+              >
+                <BrainIcon
+                  className={cn("size-4", !memoryEnabled && "opacity-50")}
+                />
+              </Button>
+            }
+          />
+          <TooltipContent>
+            {!canShare
+              ? "Start a chat to set memory"
+              : memoryEnabled
+                ? "Memory on for this chat — click for a clean room"
+                : "Memory off for this chat — click to allow it"}
+          </TooltipContent>
+        </Tooltip>
         <ThemeToggle />
       </div>
     </header>
@@ -162,15 +202,21 @@ export function ChatView({
   providerMessage = null,
   user,
   initialActiveId = null,
+  memoryAutoSuggest = true,
+  memories = [],
 }: {
   conversations: Conversation[];
   provider: ProviderSummary;
   search?: SearchSummary;
+  /** Everything remembered for this user, for the Memory panel. */
+  memories?: Memory[];
   models: Model[];
   providerStatus?: ProviderStatus;
   providerMessage?: string | null;
   user: SessionUser;
   initialActiveId?: string | null;
+  /** Whether to offer a memory suggestion after each turn. */
+  memoryAutoSuggest?: boolean;
 }) {
   const router = useRouter();
   const [prevInitialId, setPrevInitialId] = React.useState(initialActiveId);
@@ -234,6 +280,45 @@ export function ChatView({
   const [pending, setPending] = React.useState<Message[]>([]);
   const serverBaselineRef = React.useRef(0);
   const toolCallsRef = React.useRef<ToolCallInfo[]>([]);
+
+  /**
+   * Proposed memories awaiting the user's click. Held here only — nothing is
+   * persisted until they edit the text and press Save in the message editor.
+   */
+  const [memorySuggestions, setMemorySuggestions] = React.useState<
+    Record<string, MemorySuggestion>
+  >({});
+  const savedMessageIdRef = React.useRef<string | null>(null);
+
+  /** Optimistic override for the per-conversation memory switch. */
+  const [memoryOverride, setMemoryOverride] = React.useState<
+    Record<string, boolean>
+  >({});
+
+  async function handleSuggest(messageId: string) {
+    if (!memoryAutoSuggest) return;
+    const suggestion = await suggestMemory(messageId);
+    if (suggestion) {
+      setMemorySuggestions((prev) => ({ ...prev, [messageId]: suggestion }));
+    }
+  }
+
+  /** A memory was saved from this message — stop offering the suggestion. */
+  function handleRemember(messageId: string) {
+    setMemorySuggestions((prev) => {
+      if (!(messageId in prev)) return prev;
+      const next = { ...prev };
+      delete next[messageId];
+      return next;
+    });
+  }
+
+  async function handleToggleMemory() {
+    if (!active) return;
+    const next = !(memoryOverride[active.id] ?? active.memoryEnabled);
+    setMemoryOverride((prev) => ({ ...prev, [active.id]: next }));
+    await setConversationMemoryEnabled(active.id, next).catch(() => {});
+  }
 
   // Streamed text is accumulated here and revealed at animation-frame cadence
   // rather than on network arrival. Without this the reveal rate is at the
@@ -483,6 +568,10 @@ export function ChatView({
               toolCallsRef.current = next;
               return next;
             });
+          } else if (frame.includes("event: done")) {
+            if (typeof payload.id === "string") {
+              savedMessageIdRef.current = payload.id;
+            }
           } else if (frame.includes("event: error")) {
             throw new Error(payload.message);
           }
@@ -546,6 +635,11 @@ export function ChatView({
       // refreshChat may fail — the pending copy is the fallback either way.
       await refreshChat().catch(() => {});
       if (failure) setStreamError(failure);
+
+      // Offer a memory for the finished turn. This never saves anything.
+      const savedId = savedMessageIdRef.current;
+      savedMessageIdRef.current = null;
+      if (savedId && !failure) void handleSuggest(savedId);
     }
   }
 
@@ -661,6 +755,10 @@ export function ChatView({
             onTogglePin={handleTogglePin}
             onConfigure={() => handleOpenSettings("provider")}
             onShare={() => setShareDialogOpen(true)}
+            memoryEnabled={
+              active ? (memoryOverride[active.id] ?? active.memoryEnabled) : true
+            }
+            onToggleMemory={handleToggleMemory}
           />
 
           <div className="flex min-h-0 flex-1 flex-col">
@@ -674,6 +772,8 @@ export function ChatView({
                       isStreaming={streaming}
                       onRegenerate={handleRegenerate}
                       onFeedback={handleFeedback}
+                      memorySuggestion={memorySuggestions[message.id]}
+                      onMemorySaved={handleRemember}
                     />
                   ))}
 
@@ -770,6 +870,8 @@ export function ChatView({
         initialTab={settingsTab}
         initialSystemPrompt={user.systemPrompt}
         initialSearch={search}
+        memories={memories}
+        memoryAutoSuggest={memoryAutoSuggest}
       />
 
       <ShareDialog

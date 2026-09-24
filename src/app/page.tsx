@@ -5,6 +5,8 @@ import { ChatView } from "@/components/chat/chat-view";
 import { checkProviderHealth } from "@/db/models";
 import {
   getConversations,
+  getMemoryPrefs,
+  getMemorySummary,
   getProviderSummary,
   getSearchSummary,
   getUserSystemPrompt,
@@ -27,14 +29,23 @@ export default async function Page() {
   const session = await auth();
   if (!session?.user?.id) redirect("/login");
 
-  const [conversations, provider, health, systemPrompt, search] =
-    await Promise.all([
-      getConversations(session.user.id),
-      getProviderSummary(session.user.id),
-      checkProviderHealth(session.user.id),
-      getUserSystemPrompt(session.user.id),
-      getSearchSummary(session.user.id),
-    ]);
+  const [
+    conversations,
+    provider,
+    health,
+    systemPrompt,
+    search,
+    memories,
+    memoryPrefs,
+  ] = await Promise.all([
+    getConversations(session.user.id),
+    getProviderSummary(session.user.id),
+    checkProviderHealth(session.user.id),
+    getUserSystemPrompt(session.user.id),
+    getSearchSummary(session.user.id),
+    getMemorySummary(session.user.id),
+    getMemoryPrefs(session.user.id),
+  ]);
 
   const email = session.user.email ?? "";
 
@@ -43,6 +54,8 @@ export default async function Page() {
       conversations={conversations}
       provider={provider}
       search={search}
+      memories={memories}
+      memoryAutoSuggest={memoryPrefs.autoSuggestMemory}
       models={health.models}
       providerStatus={health.status}
       providerMessage={health.message}

@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
   CheckIcon,
+  BookmarkIcon,
   CopyIcon,
   FileTextIcon,
   ImageIcon,
@@ -12,7 +13,6 @@ import {
   ThumbsUpIcon,
 } from "lucide-react";
 
-import type { Feedback, Message } from "@/lib/types";
 import { useSessionUser } from "@/components/chat/user-context";
 
 /** Gateways return ids like `anthropic/claude-sonnet-4.5`; show the tail. */
@@ -22,7 +22,24 @@ function modelLabel(id: string) {
 }
 import { cn } from "cn";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { saveMemory } from "@/app/actions";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import type {
+  Feedback,
+  MemoryCategory,
+  MemorySuggestion,
+  Message,
+} from "@/lib/types";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Markdown } from "@/components/chat/markdown";
 import { ProviderMark } from "@/components/chat/provider-mark";
@@ -65,6 +82,170 @@ function IconAction({
       />
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+const MEMORY_CATEGORIES: { id: MemoryCategory; name: string }[] = [
+  { id: "preference", name: "Preference" },
+  { id: "personal", name: "Personal" },
+  { id: "project", name: "Project" },
+  { id: "constraint", name: "Constraint" },
+];
+
+/**
+ * The remember affordance: a bookmark beside thumbs-down that opens an inline
+ * editor under the turn.
+ *
+ * Nothing is written until Save is pressed and the text is visible and editable
+ * first. That is the whole difference between this and silent extraction — the
+ * system proposes, the user decides, and the user can see exactly what will be
+ * replayed into every future conversation.
+ */
+function MemoryAction({
+  messageId,
+  suggestion,
+  onMemorySaved,
+}: {
+  messageId: string;
+  suggestion?: MemorySuggestion | null;
+  onMemorySaved?: (messageId: string) => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [content, setContent] = React.useState("");
+  const [category, setCategory] =
+    React.useState<MemoryCategory>("preference");
+  const [global, setGlobal] = React.useState(true);
+  const [touched, setTouched] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [saved, setSaved] = React.useState(false);
+
+  // A suggestion arrives asynchronously after the turn. Pre-fill only while
+  // the user has not started typing — never overwrite their words. Adjusted
+  // during render rather than in an effect, matching provider-key-dialog.tsx.
+  const [prevSuggestion, setPrevSuggestion] = React.useState(suggestion);
+  if (suggestion !== prevSuggestion) {
+    setPrevSuggestion(suggestion);
+    if (suggestion && !touched) {
+      setContent(suggestion.content);
+      setCategory(suggestion.category);
+    }
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await saveMemory({
+        messageId,
+        category,
+        content,
+        global,
+      });
+      if (result.ok) {
+        setSaved(true);
+        setOpen(false);
+        onMemorySaved?.(messageId);
+      } else {
+        setError(result.error ?? "Could not save that memory.");
+      }
+    } catch {
+      setError("Could not save that memory.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="contents">
+      <span className="relative">
+        <IconAction
+          label={
+            saved
+              ? "Saved to memory"
+              : suggestion && !touched
+                ? "Suggested memory"
+                : "Remember"
+          }
+          active={saved}
+          icon={<BookmarkIcon className="size-3.5" />}
+          onClick={() => setOpen((prev) => !prev)}
+        />
+        {suggestion && !saved && !touched ? (
+          <span className="pointer-events-none absolute top-0.5 right-0.5 size-1.5 rounded-full bg-primary" />
+        ) : null}
+      </span>
+
+      {open ? (
+        <div className="mt-2 w-full max-w-xl rounded-xl border bg-card p-3 text-xs">
+          <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+            {suggestion && !touched ? "Suggested — edit before saving" : "Remember this"}
+          </div>
+
+          <Textarea
+            rows={3}
+            value={content}
+            onChange={(e) => {
+              setContent(e.target.value);
+              setTouched(true);
+            }}
+            placeholder="One standalone sentence, understandable on its own…"
+            className="text-xs"
+          />
+
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Label className="text-[11px] text-muted-foreground">Category</Label>
+              <Select
+                value={category}
+                onValueChange={(v) => v && setCategory(v as MemoryCategory)}
+              >
+                <SelectTrigger size="sm" className="h-7 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {MEMORY_CATEGORIES.map((option) => (
+                    <SelectItem key={option.id} value={option.id}>
+                      {option.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <Switch checked={global} onCheckedChange={setGlobal} />
+              Apply to all conversations
+            </label>
+          </div>
+
+          {error ? (
+            <p role="alert" className="mt-2 text-[11px] text-destructive">
+              {error}
+            </p>
+          ) : null}
+
+          <div className="mt-3 flex gap-2">
+            <Button
+              size="sm"
+              className="h-7 gap-1.5 text-xs"
+              onClick={handleSave}
+              disabled={saving || !content.trim()}
+            >
+              {saving ? "Saving…" : "Save memory"}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs"
+              onClick={() => setOpen(false)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -117,12 +298,16 @@ export function MessageBubble({
   isStreaming = false,
   onRegenerate,
   onFeedback,
+  memorySuggestion,
+  onMemorySaved,
 }: {
   message: Message;
   streaming?: boolean;
   isStreaming?: boolean;
   onRegenerate?: (messageId: string) => void;
   onFeedback?: (messageId: string, feedback: Feedback | null) => void;
+  memorySuggestion?: MemorySuggestion | null;
+  onMemorySaved?: (messageId: string) => void;
 }) {
   const user = useSessionUser();
   const [feedbackOverride, setFeedbackOverride] = React.useState<{
@@ -236,6 +421,11 @@ export function MessageBubble({
               />
             }
             onClick={() => handleFeedback("dislike")}
+          />
+          <MemoryAction
+            messageId={message.id}
+            suggestion={memorySuggestion}
+            onMemorySaved={onMemorySaved}
           />
           {message.stats ? (
             <span
