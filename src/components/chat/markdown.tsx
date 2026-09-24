@@ -2,7 +2,13 @@
 
 import * as React from "react";
 import ReactMarkdown from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+
+// KaTeX ships its own fonts; without this the glyphs fall back to whatever the
+// OS has and equations come out misaligned.
+import "katex/dist/katex.min.css";
 
 import { CodeBlock } from "@/components/chat/code-block";
 
@@ -42,7 +48,16 @@ export function Markdown({ content }: { content: string }) {
     <MarkdownErrorBoundary fallbackText={content}>
       <div className="text-[15px] leading-7 text-foreground/90">
         <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[
+            [
+              rehypeKatex,
+              // Malformed maths must degrade to readable text rather than
+              // throw — the boundary below would otherwise swallow the entire
+              // message because of one bad expression.
+              { throwOnError: false, errorColor: "#ef4444" },
+            ],
+          ]}
           components={{
             pre({ children }) {
               // Unnest pre so CodeBlock's custom container doesn't create invalid <pre><div> nesting
