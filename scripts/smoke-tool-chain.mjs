@@ -118,6 +118,7 @@ const b = await run(20135, "keep searching forever please");
 steps.push({
   step: "round cap names the model",
   ok: b.shown.includes("chain-model"),
+  detail: b.shown.replace(/\s+/g, " ").slice(-400),
 });
 steps.push({
   step: "round cap suggests an action",

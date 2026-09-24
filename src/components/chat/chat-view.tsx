@@ -221,6 +221,75 @@ export function ChatView({
   const [localUser, setLocalUser] = React.useState<Message | null>(null);
   const [streamText, setStreamText] = React.useState("");
   const [streamingToolCalls, setStreamingToolCalls] = React.useState<ToolCallInfo[]>([]);
+
+  /**
+   * A finished turn awaiting the server's copy of it.
+   *
+   * The streamed reply lives in `streamText` while it runs, which is a
+   * different thing from `active.messages` (server data). Clearing the former
+   * before the latter had arrived left a gap where the whole turn was simply
+   * not on screen — it reappeared only once refreshChat() landed. Keeping the
+   * turn here until the server count has caught up makes the handover seamless.
+   */
+  const [pending, setPending] = React.useState<Message[]>([]);
+  const serverBaselineRef = React.useRef(0);
+  const toolCallsRef = React.useRef<ToolCallInfo[]>([]);
+
+  // Streamed text is accumulated here and revealed at animation-frame cadence
+  // rather than on network arrival. Without this the reveal rate is at the
+  // mercy of TCP: a chunk arriving alone renders one word, a coalesced burst
+  // renders a whole paragraph at once, so the same stream looks smooth or
+  // blocky at random. Revealing a slice per frame makes it consistent and
+  // self-catching-up.
+  const queuedTextRef = React.useRef("");
+  const shownTextRef = React.useRef("");
+  const rafRef = React.useRef<number | null>(null);
+
+  const scheduleReveal = React.useCallback(() => {
+    if (rafRef.current !== null) return;
+    rafRef.current = requestAnimationFrame(function tick() {
+      rafRef.current = null;
+      const backlog = queuedTextRef.current;
+      if (!backlog) return;
+      // Small enough to read as streaming, large enough that a paragraph
+      // clears in a fraction of a second rather than lagging behind.
+      const slice = backlog.slice(
+        0,
+        Math.max(24, Math.ceil(backlog.length / 12)),
+      );
+      queuedTextRef.current = backlog.slice(slice.length);
+      shownTextRef.current += slice;
+      setStreamText(shownTextRef.current);
+      if (queuedTextRef.current) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
+    });
+  }, []);
+
+  const pushStreamText = React.useCallback(
+    (delta: string) => {
+      queuedTextRef.current += delta;
+      scheduleReveal();
+    },
+    [scheduleReveal],
+  );
+
+  /** Returns everything streamed so far, including what is still queued. */
+  const takeStreamText = React.useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    const all = shownTextRef.current + queuedTextRef.current;
+    queuedTextRef.current = "";
+    shownTextRef.current = "";
+    return all;
+  }, []);
+
+  const resetStreamText = React.useCallback(() => {
+    takeStreamText();
+    setStreamText("");
+  }, [takeStreamText]);
   const [streaming, setStreaming] = React.useState(false);
   // Starting a chat rewrites the URL to /c/<id>, which remounts this tree and
   // destroys local state. A gateway error raised during that window would be
@@ -262,7 +331,23 @@ export function ChatView({
 
   React.useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [active?.messages.length, localUser, streamText, streaming]);
+  }, [active?.messages.length, localUser, streamText, streaming, pending]);
+
+  // Drop the pending copy once the server's own copy of the turn has landed.
+  // The count is measured from before the turn started, so a refresh that
+  // arrives mid-stream (createUserMessage triggers one) cannot trip it early.
+  React.useEffect(() => {
+    if (pending.length === 0) return;
+    const serverCount = active?.messages.length ?? 0;
+    if (serverCount >= serverBaselineRef.current + pending.length) {
+      setPending([]);
+      return;
+    }
+    // Safety net: never leave a stale copy on screen if the refresh silently
+    // fails or comes back without the turn.
+    const timer = setTimeout(() => setPending([]), 8000);
+    return () => clearTimeout(timer);
+  }, [active?.messages.length, pending]);
 
   React.useEffect(() => {
     return () => abortRef.current?.abort();
@@ -289,13 +374,16 @@ export function ChatView({
     });
 
     setStreamError(null);
-    setLocalUser({
+    serverBaselineRef.current = active?.messages.length ?? 0;
+    toolCallsRef.current = [];
+    const userMessage: Message = {
       id: "local-user",
       role: "user",
       content: text,
       createdAt: now,
-    });
-    setStreamText("");
+    };
+    setLocalUser(userMessage);
+    resetStreamText();
     setStreamingToolCalls([]);
     setStreaming(true);
 
@@ -318,7 +406,13 @@ export function ChatView({
       return;
     }
 
-    await streamResponse(conversationId, modelId, thinkingLevel, webSearch);
+    await streamResponse(
+      conversationId,
+      modelId,
+      thinkingLevel,
+      webSearch,
+      userMessage,
+    );
   }
 
   async function streamResponse(
@@ -326,6 +420,7 @@ export function ChatView({
     modelId: string,
     level: ThinkingLevel = "off",
     webSearch: boolean = true,
+    userMessage?: Message,
   ) {
     const controller = new AbortController();
     abortRef.current = controller;
@@ -368,24 +463,25 @@ export function ChatView({
 
           const payload = JSON.parse(dataLine.slice(5).trim());
           if (frame.includes("event: delta")) {
-            setStreamText((prev) => prev + payload.delta);
+            pushStreamText(payload.delta);
           } else if (frame.includes("event: tool_start")) {
             setStreamingToolCalls((prev) => {
               const existing = prev.find((t) => t.id === payload.id);
-              if (existing) {
-                return prev.map((t) =>
-                  t.id === payload.id ? { ...t, ...payload } : t,
-                );
-              }
-              return [...prev, payload];
+              const next = existing
+                ? prev.map((t) =>
+                    t.id === payload.id ? { ...t, ...payload } : t,
+                  )
+                : [...prev, payload];
+              toolCallsRef.current = next;
+              return next;
             });
           } else if (frame.includes("event: tool_done")) {
             setStreamingToolCalls((prev) => {
-              return prev.map((t) =>
-                t.id === payload.id
-                  ? { ...t, ...payload, state: "done" }
-                  : t,
+              const next = prev.map((t) =>
+                t.id === payload.id ? { ...t, ...payload, state: "done" } : t,
               );
+              toolCallsRef.current = next;
+              return next;
             });
           } else if (frame.includes("event: error")) {
             throw new Error(payload.message);
@@ -421,15 +517,35 @@ export function ChatView({
       }
     } finally {
       abortRef.current = null;
-      try {
-        await refreshChat();
-      } finally {
-        setStreaming(false);
-        setLocalUser(null);
-        setStreamText("");
-        setStreamingToolCalls([]);
-        if (failure) setStreamError(failure);
+
+      // Hand the turn to a pending copy BEFORE clearing the live overlay, so
+      // there is no frame in which the message is missing from the screen. It
+      // stays until the server's copy has landed (see the effect above).
+      const streamed = takeStreamText();
+      const handoff: Message[] = [];
+      if (userMessage) handoff.push(userMessage);
+      if (streamed.trim() || toolCallsRef.current.length > 0) {
+        handoff.push({
+          id: "local-assistant",
+          role: "assistant",
+          content: streamed,
+          createdAt: "",
+          modelId,
+          toolCalls:
+            toolCallsRef.current.length > 0 ? toolCallsRef.current : undefined,
+        });
       }
+      if (handoff.length > 0) setPending(handoff);
+
+      setStreaming(false);
+      setLocalUser(null);
+      setStreamText("");
+      setStreamingToolCalls([]);
+      toolCallsRef.current = [];
+
+      // refreshChat may fail — the pending copy is the fallback either way.
+      await refreshChat().catch(() => {});
+      if (failure) setStreamError(failure);
     }
   }
 
@@ -440,7 +556,9 @@ export function ChatView({
     }
 
     setStreamError(null);
-    setStreamText("");
+    serverBaselineRef.current = active?.messages.length ?? 0;
+    toolCallsRef.current = [];
+    resetStreamText();
     setStreaming(true);
 
     let targetConversationId: string;
@@ -487,7 +605,9 @@ export function ChatView({
     if (!lastMsg) return;
 
     if (lastMsg.role === "user") {
-      setStreamText("");
+      serverBaselineRef.current = active?.messages.length ?? 0;
+      toolCallsRef.current = [];
+      resetStreamText();
       setStreamingToolCalls([]);
       setStreaming(true);
       await streamResponse(activeId, modelId, thinkingLevel, true);
@@ -497,12 +617,13 @@ export function ChatView({
   }
 
   const messages = active?.messages ?? [];
-  const lastMessage = messages.at(-1);
+  const visibleMessages = [...messages, ...pending];
+  const lastMessage = visibleMessages.at(-1);
   const lastMessageWasUserAndNoAssistantReply =
     !streaming && !streamText && lastMessage?.role === "user";
   const showTranscript =
     Boolean(activeId) ||
-    messages.length > 0 ||
+    visibleMessages.length > 0 ||
     Boolean(localUser) ||
     streaming ||
     Boolean(streamText) ||
@@ -554,6 +675,11 @@ export function ChatView({
                       onRegenerate={handleRegenerate}
                       onFeedback={handleFeedback}
                     />
+                  ))}
+
+                  {/* The just-finished turn, until the server's copy lands. */}
+                  {pending.map((message) => (
+                    <MessageBubble key={message.id} message={message} />
                   ))}
 
                   {localUser ? <MessageBubble message={localUser} /> : null}
