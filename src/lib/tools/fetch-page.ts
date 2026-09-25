@@ -154,10 +154,23 @@ export async function fetchPage(rawUrl: string): Promise<PageContent> {
     redirect: "follow",
     signal: AbortSignal.timeout(TIMEOUT_MS),
     headers: {
-      "User-Agent": "OmniChat/0.1 (web research)",
-      Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+      // A browser-shaped UA. Identifying ourselves as "OmniChat/0.1" earns a
+      // 403 from Fandom, GitHub wikis and most forums, which then reads to the
+      // model as "the page is gone" and sends it searching for substitutes.
+      // The DuckDuckGo scraper below uses the same shape for the same reason.
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
     },
   });
+
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(
+      "the site blocks automated readers. Do not retry this page or others on the same domain — use the search results you already have",
+    );
+  }
 
   if (!response.ok) {
     throw new Error(`The page responded ${response.status}.`);

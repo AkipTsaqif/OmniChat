@@ -411,7 +411,7 @@ export async function POST(request: Request) {
         // cut turns off mid-thought: the model would announce "let me check the
         // FAQ" and then go silent, because the call that followed was dropped.
         // Loop until it answers, and say so plainly if it never does.
-        const MAX_TOOL_ROUNDS = 3;
+        const MAX_TOOL_ROUNDS = 5;
         let pendingToolCalls = Object.values(toolCallsAccumulator);
         let convoMessages: Record<string, unknown>[] = [...promptMessages];
         let rounds = 0;
