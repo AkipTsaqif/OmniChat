@@ -130,7 +130,65 @@ type ToolAccumulator = Record<
   { id: string; name: string; arguments: string }
 >;
 
-/** Folds one streamed tool-call delta into its accumulator entry. */
+/**
+ * Pulls the arguments out of a streamed tool call.
+ *
+ * Deliberately forgiving. The declared schema says `query` and `url`, but the
+ * name that arrives depends on the gateway's translator — and an empty or
+ * truncated arguments blob (seen through the Antigravity/Gemini path) parses
+ * to nothing at all. Falling back to the payload's only string value rescues
+ * the call instead of throwing the model's intent away and letting it retry
+ * the same broken invocation.
+ */
+function extractToolArgs(raw: string): { query: string; url: string } {
+  let query = "";
+  let url = "";
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      const asString = (keys: string[]) => {
+        for (const key of keys) {
+          const value = record[key];
+          if (typeof value === "string" && value.trim()) return value.trim();
+        }
+        return "";
+      };
+      query = asString([
+        "query",
+        "q",
+        "search",
+        "search_query",
+        "searchQuery",
+        "keywords",
+        "terms",
+        "input",
+      ]);
+      url = asString(["url", "href", "link", "uri"]);
+
+      // Unrecognised key names: the call has exactly one payload, so use it.
+      if (!query && !url) {
+        for (const value of Object.values(record)) {
+          if (typeof value === "string" && value.trim()) {
+            query = value.trim();
+            break;
+          }
+        }
+      }
+    }
+  } catch {
+    // Malformed or truncated JSON. Strip the punctuation we can see and use
+    // what is left — a garbled query still beats an empty one.
+    query = raw.replace(/["{}:,\[\]]/g, " ").replace(/\s+/g, " ").trim();
+  }
+
+  return { query, url };
+}
+
+/**
+ * Folds one streamed tool-call delta into its accumulator entry.
+ */
 function foldToolDelta(acc: ToolAccumulator, tc: {
   index?: number;
   id?: string;
@@ -451,13 +509,7 @@ export async function POST(request: Request) {
           for (const tc of pendingToolCalls) {
             let query = "";
             let targetUrl = "";
-            try {
-              const parsed = JSON.parse(tc.arguments);
-              query = parsed.query || parsed.q || parsed.search || "";
-              targetUrl = parsed.url || parsed.href || parsed.link || "";
-            } catch {
-              query = tc.arguments.replace(/["{}:]/g, "").trim();
-            }
+            ({ query, url: targetUrl } = extractToolArgs(tc.arguments));
 
             // fetch_page reads a page; web_search is the only other tool.
             // Matched on "fetch" so a mangled or aliased name cannot make the
@@ -481,6 +533,39 @@ export async function POST(request: Request) {
                   `which last returned: ${previous}. ` +
                   "This is a stuck loop rather than a slow search. Try again, or turn off web search.",
               );
+            }
+
+            if (!subject) {
+              // Tell the model how to call the tool, not just that it failed.
+              // "The search query was empty" reads as a transient error and
+              // invites the identical retry that just produced it.
+              const hint = isFetch
+                ? "fetch_page needs a `url` argument holding an absolute http(s) URL."
+                : "web_search needs a `query` argument holding specific search terms.";
+              const reason = "the tool was called without its argument";
+              const emptyContent = `${hint} Your previous call sent no argument at all. Call it again with the argument filled in, or answer from what you already have.`;
+              toolCallsMade++;
+              toolCallsFailed++;
+              toolDiagnostics.push(
+                `${isFetch ? "fetch_page" : "web_search"}((no argument)) -> failed: ${reason}`,
+              );
+              controller.enqueue(
+                encoder.encode(
+                  sse("tool_done", {
+                    id: tc.id,
+                    name: tc.name,
+                    query: "",
+                    state: "failed",
+                    error: reason,
+                  }),
+                ),
+              );
+              toolResultsForGateway.push({
+                role: "tool",
+                tool_call_id: tc.id,
+                content: emptyContent,
+              });
+              continue;
             }
 
             // 1. Notify frontend: live tool execution started
