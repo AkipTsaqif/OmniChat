@@ -29,6 +29,7 @@ import {
   setConversationMemoryEnabled,
   setConversationModel,
   setMessageFeedback,
+  suggestConversationTitle,
   suggestMemory,
   togglePinned,
 } from "@/app/actions";
@@ -306,6 +307,8 @@ export function ChatView({
     Record<string, MemorySuggestion>
   >({});
   const savedMessageIdRef = React.useRef<string | null>(null);
+  /** Set when this turn opened a new conversation, cleared once titled. */
+  const pendingTitleRef = React.useRef(false);
 
   /** Optimistic override for the per-conversation memory switch. */
   const [memoryOverride, setMemoryOverride] = React.useState<
@@ -474,6 +477,11 @@ export function ChatView({
       setKeyDialogOpen(true);
       return;
     }
+
+    // A brand new conversation gets its title summarised once the first
+    // exchange has landed — an opening message alone is a question, not a
+    // subject worth naming.
+    if (!activeId) pendingTitleRef.current = true;
 
     const now = new Date().toLocaleTimeString("en-GB", {
       hour: "2-digit",
@@ -662,6 +670,12 @@ export function ChatView({
       const savedId = savedMessageIdRef.current;
       savedMessageIdRef.current = null;
       if (savedId && !failure) void handleSuggest(savedId);
+
+      // Summarise the sidebar title once the first exchange is complete.
+      if (pendingTitleRef.current && !failure) {
+        pendingTitleRef.current = false;
+        void suggestConversationTitle(conversationId);
+      }
     }
   }
 

@@ -588,6 +588,109 @@ export async function setAutoSuggestMemory(
 }
 
 /**
+ * Summarises a conversation into a short sidebar title.
+ *
+ * Deliberately called after the first exchange rather than at creation: the
+ * opening message alone is a question, not a subject. "itu booking online yg
+ * 80 tiket…" describes what was asked; the answer is what the conversation is
+ * actually about.
+ *
+ * Only ever replaces a title the app generated. A title the user set by hand
+ * is left alone, and a failure keeps the truncated one — a missing summary is
+ * never worth an error.
+ */
+export async function suggestConversationTitle(
+  conversationId: string,
+): Promise<{ ok: boolean }> {
+  const userId = await requireUserId();
+  await assertOwned(conversationId, userId);
+
+  const [settings] = await db
+    .select()
+    .from(providerSettings)
+    .where(eq(providerSettings.userId, userId))
+    .limit(1);
+  if (!settings) return { ok: false };
+
+  const rows = await db
+    .select({
+      role: messages.role,
+      content: messages.content,
+      createdAt: messages.createdAt,
+    })
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+    .orderBy(asc(messages.createdAt))
+    .limit(4);
+
+  // Only the first exchange, only once.
+  if (rows.length < 2) return { ok: false };
+  const firstUser = rows.find((r) => r.role === "user");
+  if (!firstUser) return { ok: false };
+
+  const [conversation] = await db
+    .select({ title: conversations.title, modelId: conversations.modelId })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId))
+    .limit(1);
+  if (!conversation) return { ok: false };
+
+  // The user has renamed it since — do not overwrite their words.
+  if (conversation.title !== titleFrom(firstUser.content)) {
+    return { ok: false };
+  }
+
+  const transcript = rows
+    .map((r) => `${r.role}: ${r.content.slice(0, 400)}`)
+    .join("\n\n");
+
+  try {
+    const response = await fetch(`${settings.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${decryptSecret(settings.apiKeyCipher)}`,
+      },
+      body: JSON.stringify({
+        model: conversation.modelId,
+        stream: false,
+        messages: [
+          {
+            role: "system",
+            content:
+              "Give this conversation a short title of at most 6 words saying what it is about. Reply with the title only: no quotes, no trailing punctuation, no emoji, no explanation.",
+          },
+          { role: "user", content: transcript },
+        ],
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) return { ok: false };
+
+    const body = (await response.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const raw = (body.choices?.[0]?.message?.content ?? "")
+      .replace(/^\s*["'`]+|["'`]+\s*$/g, "")
+      .replace(/[.:!?\s]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!raw || raw.length > 80) return { ok: false };
+
+    await db
+      .update(conversations)
+      .set({ title: raw, updatedAt: new Date() })
+      .where(eq(conversations.id, conversationId));
+
+    revalidatePath("/", "layout");
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
  * Proposes a memory. Writes NOTHING — the user sees and edits the text before
  * anything is stored, which is the whole difference between this and silent
  * extraction.
