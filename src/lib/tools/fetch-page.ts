@@ -172,6 +172,12 @@ export async function fetchPage(rawUrl: string): Promise<PageContent> {
     );
   }
 
+  if (response.status === 404) {
+    throw new Error(
+      "the page does not exist — the URL is wrong or the page has moved. Do not retry it",
+    );
+  }
+
   if (!response.ok) {
     throw new Error(`The page responded ${response.status}.`);
   }

@@ -187,6 +187,37 @@ function extractToolArgs(raw: string): { query: string; url: string } {
 }
 
 /**
+ * True when a "query" is plainly not a search phrase.
+ *
+ * A model that wants to probe a URL has no execution tool, and will happily
+ * paste a Python one-liner or a curl invocation into the search box instead.
+ * Searching for that is worse than useless — it burns a round, returns junk,
+ * and teaches the model nothing about why. Refuse it and point at fetch_page.
+ */
+function looksLikeCodeOrCommand(value: string): boolean {
+  const v = value.trim();
+  if (!v) return false;
+
+  // A bare URL is a page to read, not something to search for.
+  if (/^https?:\/\/\S+$/i.test(v)) return true;
+
+  return [
+    /^#!/,
+    /\bimport\s+[a-z_]/i,
+    /\bdef\s+[a-z_]/i,
+    /\brequire\s*\(/,
+    /\bconsole\.log\s*\(/,
+    /urllib\.request/i,
+    /\brequests\.(get|post)\s*\(/i,
+    /\bprint\s*\(/,
+    /\bcurl\s+(https?:|-{1,2}[a-z])/i,
+    /\bwget\s+(https?:|-{1,2}[a-z])/i,
+    /\bpython3?\s+-c\b/i,
+    /<\/?[a-z][^>]*>/i,
+  ].some((pattern) => pattern.test(v));
+}
+
+/**
  * Folds one streamed tool-call delta into its accumulator entry.
  */
 function foldToolDelta(acc: ToolAccumulator, tc: {
@@ -535,19 +566,20 @@ export async function POST(request: Request) {
               );
             }
 
-            if (!subject) {
-              // Tell the model how to call the tool, not just that it failed.
+            if (!subject || looksLikeCodeOrCommand(subject)) {
+              // Tell the model what the tool is for, not just that it failed.
               // "The search query was empty" reads as a transient error and
               // invites the identical retry that just produced it.
-              const hint = isFetch
-                ? "fetch_page needs a `url` argument holding an absolute http(s) URL."
-                : "web_search needs a `query` argument holding specific search terms.";
-              const reason = "the tool was called without its argument";
-              const emptyContent = `${hint} Your previous call sent no argument at all. Call it again with the argument filled in, or answer from what you already have.`;
+              const reason = !subject
+                ? "the tool was called without its argument"
+                : "the argument was code or a shell command, not a search phrase";
+              const emptyContent = !subject
+                ? `${isFetch ? "fetch_page needs a `url` argument holding an absolute http(s) URL." : "web_search needs a `query` argument holding specific search terms."} Your previous call sent no argument at all. Call it again with the argument filled in, or answer from what you already have.`
+                : `web_search takes a short natural-language search phrase — not code, and not a shell command. It cannot execute anything. To find out what a page says, use fetch_page with that URL instead; to check whether a URL is reachable, use fetch_page on it too. Do not put programs or commands in the query.`;
               toolCallsMade++;
               toolCallsFailed++;
               toolDiagnostics.push(
-                `${isFetch ? "fetch_page" : "web_search"}((no argument)) -> failed: ${reason}`,
+                `${isFetch ? "fetch_page" : "web_search"}(${JSON.stringify(subject).slice(0, 60)}) -> failed: ${reason}`,
               );
               controller.enqueue(
                 encoder.encode(
