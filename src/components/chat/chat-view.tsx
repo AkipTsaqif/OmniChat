@@ -255,6 +255,23 @@ export function ChatView({
   // Null until the user picks explicitly, so a late-arriving model list (after
   // the key is saved) still supplies a sensible default without an effect.
   const [draftModelId, setDraftModelId] = React.useState<string | null>(null);
+
+  // A model chosen once should stay chosen. Without this every new chat falls
+  // back to models[0], so a large gateway always hands you the same arbitrary
+  // first entry no matter how often you have picked something else. Loaded in
+  // an effect rather than the initialiser so server and client render the same
+  // markup on the first pass.
+  React.useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("omnichat.lastModel");
+      if (saved) {
+        setDraftModelId((current) => current ?? saved);
+      }
+    } catch {
+      // Private browsing or a locked-down profile: a missing preference is
+      // not worth failing the page over.
+    }
+  }, []);
   // Only force the dialog open when nothing is configured, or when the stored
   // key genuinely cannot be used again. A gateway that is merely down or
   // briefly unreachable should not nag for a key that is still valid.
@@ -440,6 +457,11 @@ export function ChatView({
 
   function handleModelChange(next: string) {
     setDraftModelId(next);
+    try {
+      window.localStorage.setItem("omnichat.lastModel", next);
+    } catch {
+      // Persisting the preference is a nicety; never let it break the picker.
+    }
     if (!activeId) return;
     startTransition(async () => {
       await setConversationModel(activeId, next);
