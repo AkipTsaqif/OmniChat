@@ -683,7 +683,11 @@ export async function suggestConversationTitle(
       .set({ title: raw, updatedAt: new Date() })
       .where(eq(conversations.id, conversationId));
 
-    revalidatePath("/", "layout");
+    // Deliberately no revalidatePath here. This runs fire-and-forget at the
+    // end of a turn, and a second revalidate racing the caller's own refresh —
+    // while the URL had just been rewritten to the new conversation — left the
+    // router rendering a tree that did not match the address bar. The caller
+    // refreshes once, after this resolves.
     return { ok: true };
   } catch {
     return { ok: false };

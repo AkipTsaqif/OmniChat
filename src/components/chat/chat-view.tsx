@@ -56,6 +56,23 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { UserContext, type SessionUser } from "@/components/chat/user-context";
 import { ShareDialog } from "@/components/chat/share-dialog";
 
+/**
+ * Turns awaiting the server's copy, keyed by conversation.
+ *
+ * Module-level on purpose: `router.replace` to a new conversation's URL
+ * remounts ChatView, and state kept on the component would drop the
+ * just-finished turn for the frames between the remount and the new server
+ * payload — which is exactly the "reply vanishes, route moves, reply comes
+ * back" flicker. Keeping it here lets the handover survive the navigation.
+ */
+const pendingStore = new Map<string, Message[]>();
+
+function storePending(conversationId: string | null, messages: Message[]) {
+  if (!conversationId) return;
+  if (messages.length === 0) pendingStore.delete(conversationId);
+  else pendingStore.set(conversationId, messages);
+}
+
 function ChatHeader({
   title,
   models,
@@ -251,7 +268,13 @@ export function ChatView({
 
   function handleNewChat() {
     setActiveId(null);
-    router.push("/");
+    // Clear the address bar immediately, then let the router catch up. Without
+    // the first line the URL sits on /c/<id> for as long as the root route
+    // takes to render, while the screen has already gone blank — the two disagree.
+    // Unlike the old replaceState bug this is self-healing: the router call
+    // below reconciles the router with the URL straight away.
+    window.history.replaceState(null, "", "/");
+    router.replace("/");
   }
   // Null until the user picks explicitly, so a late-arriving model list (after
   // the key is saved) still supplies a sensible default without an effect.
@@ -296,6 +319,11 @@ export function ChatView({
    * turn here until the server count has caught up makes the handover seamless.
    */
   const [pending, setPending] = React.useState<Message[]>([]);
+  const [prevPendingId, setPrevPendingId] = React.useState(activeId);
+  if (prevPendingId !== activeId) {
+    setPrevPendingId(activeId);
+    setPending(pendingStore.get(activeId ?? "") ?? []);
+  }
   const serverBaselineRef = React.useRef(0);
   const toolCallsRef = React.useRef<ToolCallInfo[]>([]);
 
@@ -445,14 +473,18 @@ export function ChatView({
     if (pending.length === 0) return;
     const serverCount = active?.messages.length ?? 0;
     if (serverCount >= serverBaselineRef.current + pending.length) {
+      storePending(active?.id ?? null, []);
       setPending([]);
       return;
     }
     // Safety net: never leave a stale copy on screen if the refresh silently
     // fails or comes back without the turn.
-    const timer = setTimeout(() => setPending([]), 8000);
+    const timer = setTimeout(() => {
+      storePending(active?.id ?? null, []);
+      setPending([]);
+    }, 8000);
     return () => clearTimeout(timer);
-  }, [active?.messages.length, pending]);
+  }, [active?.id, active?.messages.length, pending]);
 
   React.useEffect(() => {
     return () => abortRef.current?.abort();
@@ -511,9 +543,13 @@ export function ChatView({
       });
       conversationId = created.conversationId;
       setActiveId(conversationId);
-      if (!activeId) {
-        window.history.replaceState(null, "", `/c/${conversationId}`);
-      }
+      // The URL is deliberately NOT rewritten here. It used to be a
+      // window.history.replaceState, which moves the address bar without
+      // telling the Next router — so the router kept thinking it was at "/".
+      // The first revalidate then rendered "/" underneath a /c/<id> URL: the
+      // page went blank, landed on the root screen, and the in-flight stream
+      // died with "the connection to the gateway was interrupted". The URL is
+      // set through the router once the turn finishes instead.
     } catch {
       setStreaming(false);
       setLocalUser(null);
@@ -654,7 +690,10 @@ export function ChatView({
             toolCallsRef.current.length > 0 ? toolCallsRef.current : undefined,
         });
       }
-      if (handoff.length > 0) setPending(handoff);
+      if (handoff.length > 0) {
+        storePending(conversationId, handoff);
+        setPending(handoff);
+      }
 
       setStreaming(false);
       setLocalUser(null);
@@ -662,20 +701,42 @@ export function ChatView({
       setStreamingToolCalls([]);
       toolCallsRef.current = [];
 
-      // refreshChat may fail — the pending copy is the fallback either way.
-      await refreshChat().catch(() => {});
-      if (failure) setStreamError(failure);
-
-      // Offer a memory for the finished turn. This never saves anything.
+      // Everything that writes state is awaited before a single refresh, so
+      // exactly one revalidate happens per turn. Two of them racing — one
+      // awaited, one fire-and-forget — while the URL had just been rewritten to
+      // the new conversation is what produced the page error on new chats.
+      //
+      // refreshChat may still fail; the pending copy is the fallback either way.
       const savedId = savedMessageIdRef.current;
       savedMessageIdRef.current = null;
-      if (savedId && !failure) void handleSuggest(savedId);
 
-      // Summarise the sidebar title once the first exchange is complete.
-      if (pendingTitleRef.current && !failure) {
+      // A brand-new conversation is still sitting at "/". Navigate through the
+      // router so the URL and the router agree — then the one refresh below
+      // refetches /c/<id> rather than "/".
+      const openedNewChat = pendingTitleRef.current;
+      if (openedNewChat) {
         pendingTitleRef.current = false;
-        void suggestConversationTitle(conversationId);
+        router.replace(`/c/${conversationId}`, { scroll: false });
       }
+
+      await refreshChat().catch(() => {});
+
+      // Both of these take seconds and neither revalidates any more — the
+      // title action had its revalidatePath removed and the suggestion writes
+      // nothing — so they run in the background rather than holding the
+      // finished turn hostage. Each refreshes once when it lands.
+      if (savedId && !failure) {
+        handleSuggest(savedId)
+          .then(() => refreshChat().catch(() => {}))
+          .catch(() => {});
+      }
+      if (openedNewChat) {
+        suggestConversationTitle(conversationId)
+          .then(() => refreshChat().catch(() => {}))
+          .catch(() => {});
+      }
+
+      if (failure) setStreamError(failure);
     }
   }
 
